@@ -1,4 +1,6 @@
 aiogram>=3.31,<4
 claude-agent-sdk>=0.2.174
 faster-whisper>=1.1
+# PyAV 16+ несовместим с faster-whisper 1.2 (ошибка metadata_errors)
+av>=12,<16
 python-dotenv>=1.0

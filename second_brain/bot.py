@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 
@@ -221,14 +222,20 @@ async def ask_claude(message: Message, prompt: str) -> None:
 # ---------- голос ----------
 
 _whisper = None
+_whisper_lock = threading.Lock()
+
+
+def transcribe_model():
+    global _whisper
+    with _whisper_lock:
+        if _whisper is None:
+            from faster_whisper import WhisperModel
+            _whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+    return _whisper
 
 
 def transcribe(path: str) -> str:
-    global _whisper
-    if _whisper is None:
-        from faster_whisper import WhisperModel
-        _whisper = WhisperModel(WHISPER_MODEL, device="auto", compute_type="int8")
-    segments, _ = _whisper.transcribe(path, language=WHISPER_LANGUAGE or None, vad_filter=True)
+    segments, _ = transcribe_model().transcribe(path, language=WHISPER_LANGUAGE or None, vad_filter=True)
     return " ".join(s.text.strip() for s in segments).strip()
 
 
@@ -311,14 +318,20 @@ async def cmd_where(message: Message):
 @dp.message(F.voice | F.audio | F.video_note)
 async def on_voice(message: Message):
     media = message.voice or message.audio or message.video_note
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "voice.ogg")
-        await bot.download(media, destination=path)
-        text = await asyncio.to_thread(transcribe, path)
-    if not text:
-        await message.reply("🤷 Не разобрал голосовое.")
+    status = await message.reply("🎙 Распознаю…")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "voice.ogg")
+            await bot.download(media, destination=path)
+            text = await asyncio.to_thread(transcribe, path)
+    except Exception as e:
+        log.exception("transcription failed")
+        await status.edit_text(f"⚠️ Не получилось распознать голосовое: {e}")
         return
-    await message.reply(f"🎙 {text}")
+    if not text:
+        await status.edit_text("🤷 Не разобрал голосовое.")
+        return
+    await status.edit_text(f"🎙 {text}")
     await ask_claude(message, text)
 
 
@@ -360,7 +373,17 @@ async def on_permission(callback: CallbackQuery):
 
 async def main() -> None:
     log.info("Второй мозг запущен. Разрешённые пользователи: %s", ALLOWED_USER_IDS)
+    # модель распознавания грузим заранее, чтобы первое голосовое не ждало скачивания
+    asyncio.get_running_loop().run_in_executor(None, preload_whisper)
     await dp.start_polling(bot)
+
+
+def preload_whisper() -> None:
+    try:
+        transcribe_model()
+        log.info("Модель распознавания голоса готова")
+    except Exception:
+        log.exception("не удалось загрузить модель распознавания")
 
 
 if __name__ == "__main__":
