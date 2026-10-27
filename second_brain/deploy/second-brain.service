@@ -1,0 +1,14 @@
+[Unit]
+Description=Second Brain Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=brain
+WorkingDirectory=/home/brain/claude/second_brain
+ExecStart=/home/brain/claude/second_brain/.venv/bin/python bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
