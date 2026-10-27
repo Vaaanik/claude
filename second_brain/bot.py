@@ -93,6 +93,7 @@ class TopicSession:
     async def ensure_client(self) -> ClaudeSDKClient:
         if self.client is None:
             ts = topic_state(self.key)
+            Path(ts["cwd"]).mkdir(parents=True, exist_ok=True)
             options = ClaudeAgentOptions(
                 cwd=ts["cwd"],
                 resume=ts["session_id"],
