@@ -4,3 +4,5 @@ faster-whisper>=1.1
 # PyAV 16+ несовместим с faster-whisper 1.2 (ошибка metadata_errors)
 av>=12,<16
 python-dotenv>=1.0
+edge-tts>=7.0
+gTTS>=2.5

@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import uuid
@@ -15,7 +16,7 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -47,8 +48,14 @@ SYSTEM_PROMPT_APPEND = (
     "Ты — «второй мозг» пользователя, с тобой общаются через Telegram. "
     "Отвечай кратко и по делу, на языке пользователя. Telegram не рендерит Markdown-таблицы и заголовки, "
     "поэтому пиши простым текстом, списки — через дефис. Голосовые сообщения приходят расшифрованными "
-    "и могут содержать ошибки распознавания — понимай по смыслу."
+    "и могут содержать ошибки распознавания — понимай по смыслу. "
+    "На голосовые твой ответ озвучивается. Если в текстовом сообщении пользователь просит ответить голосом, "
+    "начни ответ с метки [VOICE] — тогда он тоже будет озвучен. Озвучиваемый ответ пиши как живую речь: "
+    "коротко, без списков, разметки, эмодзи и ссылок."
 )
+VOICE_MARKER = "[VOICE]"
+VOICE_INPUT_NOTE = "(голосовое сообщение — ответ будет озвучен)"
+TTS_VOICE = os.environ.get("TTS_VOICE", "ru-RU-DmitryNeural")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("second_brain")
@@ -168,23 +175,26 @@ async def send_long(chat_id: int, thread_id: int | None, text: str) -> None:
         await bot.send_message(chat_id, text[i:i + 4000], message_thread_id=thread_id)
 
 
-async def keep_typing(chat_id: int, thread_id: int | None) -> None:
+async def keep_typing(chat_id: int, thread_id: int | None, action: str) -> None:
     while True:
         try:
-            await bot.send_chat_action(chat_id, "typing", message_thread_id=thread_id)
+            await bot.send_chat_action(chat_id, action, message_thread_id=thread_id)
         except Exception:
             pass
         await asyncio.sleep(4)
 
 
-async def ask_claude(message: Message, prompt: str) -> None:
+async def ask_claude(message: Message, prompt: str, voice: bool = False) -> None:
     session = get_session(message)
     if session.lock.locked():
         await message.reply("⏳ Ещё работаю над прошлым сообщением, это поставил в очередь.")
     async with session.lock:
-        typing = asyncio.create_task(keep_typing(session.chat_id, session.thread_id))
+        typing = asyncio.create_task(
+            keep_typing(session.chat_id, session.thread_id, "record_voice" if voice else "typing")
+        )
         status: Message | None = None
         steps: list[str] = []
+        spoken: list[str] = []
         try:
             client = await session.ensure_client()
             await client.query(prompt)
@@ -192,7 +202,15 @@ async def ask_claude(message: Message, prompt: str) -> None:
                 if isinstance(msg, AssistantMessage):
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text.strip():
-                            await send_long(session.chat_id, session.thread_id, block.text)
+                            text = block.text
+                            # Claude ставит метку, если в текстовом сообщении попросили ответить голосом
+                            if text.lstrip().startswith(VOICE_MARKER):
+                                voice = True
+                                text = text.lstrip()[len(VOICE_MARKER):].strip()
+                            if voice:
+                                spoken.append(text)
+                            else:
+                                await send_long(session.chat_id, session.thread_id, text)
                         elif isinstance(block, ToolUseBlock):
                             # один статус-сообщение со списком шагов, чтобы не спамить
                             steps.append(f"🔧 {block.name}: {describe_tool(block.name, block.input, 80)}")
@@ -212,6 +230,8 @@ async def ask_claude(message: Message, prompt: str) -> None:
                     save_state()
                     if msg.is_error:
                         await message.reply(f"⚠️ Ошибка: {msg.result or msg.subtype}")
+            if spoken:
+                await send_voice_reply(session.chat_id, session.thread_id, "\n\n".join(spoken))
         except Exception as e:
             log.exception("claude call failed")
             await session.reset()
@@ -238,6 +258,62 @@ def transcribe_model():
 def transcribe(path: str) -> str:
     segments, _ = transcribe_model().transcribe(path, language=WHISPER_LANGUAGE or None, vad_filter=True)
     return " ".join(s.text.strip() for s in segments).strip()
+
+
+def clean_for_speech(text: str) -> str:
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"[*_#`>|]", "", text)
+    return re.sub(r"[ \t]+", " ", text).strip()
+
+
+def mp3_to_ogg(src: str, dest: str) -> None:
+    # Telegram показывает как голосовое только OGG/Opus
+    import av
+    with av.open(src) as inp, av.open(dest, "w", format="ogg") as out:
+        stream = out.add_stream("libopus", rate=48000)
+        stream.layout = "mono"
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=48000)
+        for frame in inp.decode(audio=0):
+            for f in resampler.resample(frame):
+                for packet in stream.encode(f):
+                    out.mux(packet)
+        for f in resampler.resample(None):
+            for packet in stream.encode(f):
+                out.mux(packet)
+        for packet in stream.encode(None):
+            out.mux(packet)
+
+
+async def synthesize(text: str, dest: str) -> None:
+    mp3 = dest + ".mp3"
+    try:
+        import edge_tts
+        await edge_tts.Communicate(text, TTS_VOICE).save(mp3)
+    except Exception:
+        log.warning("edge-tts недоступен, озвучиваю через gTTS", exc_info=True)
+        from gtts import gTTS
+        await asyncio.to_thread(lambda: gTTS(text, lang=WHISPER_LANGUAGE or "ru").save(mp3))
+    await asyncio.to_thread(mp3_to_ogg, mp3, dest)
+
+
+async def send_voice_reply(chat_id: int, thread_id: int | None, text: str) -> None:
+    speech = clean_for_speech(text)
+    try:
+        if not speech:
+            raise ValueError("нечего озвучивать")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "reply.ogg")
+            await synthesize(speech, path)
+            await bot.send_voice(chat_id, FSInputFile(path), message_thread_id=thread_id)
+    except Exception:
+        log.exception("tts failed")
+        await send_long(chat_id, thread_id, text)
+        return
+    # код и ссылки голосом не передать — дублируем их текстом
+    if "```" in text or "http" in text:
+        await send_long(chat_id, thread_id, text)
 
 
 # ---------- доступ ----------
@@ -319,7 +395,6 @@ async def cmd_where(message: Message):
 @dp.message(F.voice | F.audio | F.video_note)
 async def on_voice(message: Message):
     media = message.voice or message.audio or message.video_note
-    status = await message.reply("🎙 Распознаю…")
     try:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "voice.ogg")
@@ -327,13 +402,13 @@ async def on_voice(message: Message):
             text = await asyncio.to_thread(transcribe, path)
     except Exception as e:
         log.exception("transcription failed")
-        await status.edit_text(f"⚠️ Не получилось распознать голосовое: {e}")
+        await message.reply(f"⚠️ Не получилось распознать голосовое: {e}")
         return
     if not text:
-        await status.edit_text("🤷 Не разобрал голосовое.")
+        await message.reply("🤷 Не разобрал голосовое.")
         return
-    await status.edit_text(f"🎙 {text}")
-    await ask_claude(message, text)
+    log.info("voice: %s", text)
+    await ask_claude(message, f"{VOICE_INPUT_NOTE}\n\n{text}", voice=True)
 
 
 @dp.message(F.document | F.photo)
