@@ -26,6 +26,8 @@ from claude_agent_sdk import (
     ResultMessage,
     TextBlock,
     ToolUseBlock,
+    create_sdk_mcp_server,
+    tool,
 )
 from dotenv import load_dotenv
 
@@ -40,6 +42,11 @@ CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL") or None
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
 WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "ru")
 STATE_FILE = Path(__file__).with_name("state.json")
+# долговременная память: общий файл о пользователе, виден из всех тем
+MEMORY_DIR = Path(os.path.expanduser(os.environ.get("MEMORY_DIR", "~/second-brain/memory")))
+MEMORY_FILE = MEMORY_DIR / "about.md"
+# сюда кладутся папки тем, созданных ботом
+PROJECTS_DIR = Path(os.path.expanduser(os.environ.get("PROJECTS_DIR", "~/projects")))
 
 # Инструменты, которые только читают — их разрешаем без вопросов
 SAFE_TOOLS = {"Read", "Glob", "Grep", "LS", "WebSearch", "WebFetch", "TodoWrite", "NotebookRead"}
@@ -58,12 +65,23 @@ SYSTEM_PROMPT_APPEND = (
     "начни ответ с метки [VOICE] — тогда он тоже будет озвучен. Озвучиваемый ответ пиши как живую речь: "
     "коротко, без списков, разметки, эмодзи, ссылок и раздела источников."
 )
+MEMORY_PROMPT = """
+Долговременная память хранится на сервере и переживает перезапуски и новые разговоры.
+- {memory_file} — общая память о пользователе для всех тем: кто он, где живёт, чем занимается, люди вокруг, цели, предпочтения, договорённости. Когда узнаёшь что-то устойчивое или пользователь просит «запомни» — сразу допиши это туда кратко, без дублей; устаревшее исправляй. Если спрашивают, что ты помнишь, — прочитай файл заново.
+- CLAUDE.md в папке текущей темы — память этого проекта: цели, решения, статус, следующие шаги. Обновляй его, когда в проекте что-то решили или поменялось. Он подгружается автоматически в начале разговора.
+Изменения этих файлов разрешены без вопросов. Не сообщай о каждом сохранении — максимум коротко «запомнил».
+
+Работа с темами Telegram: инструмент create_topic создаёт новую тему (ветку) в группе со своей папкой проекта, list_topics показывает существующие. Когда просят создать темы или ветки под проекты — используй их.
+
+Текущее содержимое общей памяти:
+{memory}
+"""
 TOOL_LABELS = {
     "WebSearch": "🔎 Ищу", "WebFetch": "🌐 Открываю", "Bash": "💻 Команда",
-    "Read": "📖 Читаю", "Write": "📝 Пишу", "Edit": "✏️ Правлю", "Glob": "📂 Ищу файлы", "Grep": "🔍 Ищу в файлах",
+    "Read": "📖 Читаю", "mcp__telegram__create_topic": "🧵 Создаю тему", "Write": "📝 Пишу", "Edit": "✏️ Правлю", "Glob": "📂 Ищу файлы", "Grep": "🔍 Ищу в файлах",
 }
 # служебные шаги, которые пользователю показывать незачем
-HIDDEN_TOOLS = {"ToolSearch", "TodoWrite"}
+HIDDEN_TOOLS = {"ToolSearch", "TodoWrite", "mcp__telegram__list_topics"}
 VOICE_MARKER = "[VOICE]"
 VOICE_INPUT_NOTE = "(голосовое сообщение — ответ будет озвучен)"
 TTS_VOICE = os.environ.get("TTS_VOICE", "ru-RU-DmitryNeural")
@@ -98,6 +116,59 @@ def topic_state(key: str) -> dict:
     return state.setdefault(key, {"cwd": DEFAULT_CWD, "session_id": None})
 
 
+def slugify(name: str) -> str:
+    return re.sub(r"[^\w-]+", "-", name.lower()).strip("-") or "project"
+
+
+# ---------- память ----------
+
+def memory_prompt() -> str:
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    if not MEMORY_FILE.exists():
+        MEMORY_FILE.write_text("# Что я знаю о пользователе\n\n", encoding="utf-8")
+    memory = MEMORY_FILE.read_text(encoding="utf-8")
+    if len(memory) > 20000:
+        memory = memory[:20000] + "\n…(файл длиннее — дочитай при необходимости)"
+    return MEMORY_PROMPT.format(memory_file=MEMORY_FILE, memory=memory)
+
+
+def is_memory_write(tool_name: str, tool_input: dict, cwd: str) -> bool:
+    if tool_name not in ("Write", "Edit", "MultiEdit") or "file_path" not in tool_input:
+        return False
+    path = Path(tool_input["file_path"]).expanduser().resolve()
+    return path.is_relative_to(MEMORY_DIR.resolve()) or path == Path(cwd).resolve() / "CLAUDE.md"
+
+
+# ---------- инструменты Telegram для Claude ----------
+
+def telegram_tools(chat_id: int):
+    @tool("create_topic", "Создать новую тему (ветку) в группе Telegram с отдельной папкой проекта.",
+          {"name": str})
+    async def create_topic(args):
+        name = args["name"].strip()[:128]
+        try:
+            topic = await bot.create_forum_topic(chat_id, name)
+        except Exception as e:
+            return {"content": [{"type": "text", "text": (
+                f"Не удалось создать тему: {e}. Темы можно создавать только в группе с включёнными "
+                "Темами, где бот — администратор с правом управлять темами.")}], "is_error": True}
+        folder = PROJECTS_DIR / slugify(name)
+        folder.mkdir(parents=True, exist_ok=True)
+        state[f"{chat_id}:{topic.message_thread_id}"] = {"cwd": str(folder), "session_id": None, "name": name}
+        save_state()
+        await bot.send_message(chat_id, f"📁 Тема «{name}» готова. Папка проекта: {folder}",
+                               message_thread_id=topic.message_thread_id)
+        return {"content": [{"type": "text", "text": f"Создана тема «{name}», папка {folder}"}]}
+
+    @tool("list_topics", "Показать темы этой группы, которые знает бот, и их папки.", {})
+    async def list_topics(args):
+        rows = [f"- {v.get('name') or 'тема ' + k.split(':')[1]}: {v['cwd']}"
+                for k, v in state.items() if k.startswith(f"{chat_id}:")]
+        return {"content": [{"type": "text", "text": "\n".join(rows) or "Тем пока нет."}]}
+
+    return create_sdk_mcp_server(name="telegram", tools=[create_topic, list_topics])
+
+
 # ---------- сессии Claude, по одной на тему ----------
 
 class TopicSession:
@@ -116,7 +187,10 @@ class TopicSession:
                 cwd=ts["cwd"],
                 resume=ts["session_id"],
                 model=CLAUDE_MODEL,
-                system_prompt={"type": "preset", "preset": "claude_code", "append": SYSTEM_PROMPT_APPEND},
+                system_prompt={"type": "preset", "preset": "claude_code",
+                               "append": SYSTEM_PROMPT_APPEND + memory_prompt()},
+                add_dirs=[MEMORY_DIR],
+                mcp_servers={"telegram": telegram_tools(self.chat_id)},
                 setting_sources=["user", "project", "local"],
                 permission_mode="bypassPermissions" if PERMISSIONS == "auto" else "default",
                 can_use_tool=None if PERMISSIONS == "auto" else self.ask_permission,
@@ -134,7 +208,8 @@ class TopicSession:
             self.client = None
 
     async def ask_permission(self, tool_name, tool_input, context):
-        if tool_name in SAFE_TOOLS:
+        if (tool_name in SAFE_TOOLS or tool_name.startswith("mcp__telegram__")
+                or is_memory_write(tool_name, tool_input, topic_state(self.key)["cwd"])):
             return PermissionResultAllow()
         request_id = uuid.uuid4().hex[:12]
         future = asyncio.get_running_loop().create_future()
@@ -178,6 +253,8 @@ def describe_tool(name: str, tool_input: dict, limit: int = 200) -> str:
         text = tool_input.get("query", "")
     elif name == "WebFetch":
         text = tool_input.get("url", "")
+    elif name == "mcp__telegram__create_topic":
+        text = tool_input.get("name", "")
     elif "file_path" in tool_input:
         text = tool_input["file_path"]
     else:
