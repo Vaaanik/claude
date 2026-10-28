@@ -8,3 +8,4 @@ edge-tts>=7.0
 gTTS>=2.5
 google-api-python-client>=2.100
 google-auth-oauthlib>=1.2
+croniter>=2.0

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
 import uuid
@@ -37,9 +38,13 @@ load_dotenv()
 
 import google_tools  # noqa: E402 — читает переменные из .env
 from import_claude_export import import_export  # noqa: E402
+from scheduler import Scheduler  # noqa: E402
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-ALLOWED_USER_IDS = {int(x) for x in os.environ["ALLOWED_USER_IDS"].split(",") if x.strip()}
+_ALLOWED = [int(x) for x in os.environ["ALLOWED_USER_IDS"].split(",") if x.strip()]
+ALLOWED_USER_IDS = set(_ALLOWED)
+# владелец: ему в личку приходят бэкапы и системные сообщения
+OWNER_ID = _ALLOWED[0]
 DEFAULT_CWD = os.path.expanduser(os.environ.get("DEFAULT_CWD", "~"))
 # ask — спрашивать разрешение на изменения и команды; auto — разрешать всё без вопросов
 PERMISSIONS = os.environ.get("PERMISSIONS", "ask")
@@ -54,6 +59,11 @@ MEMORY_FILE = MEMORY_DIR / "about.md"
 CLAUDE_ARCHIVE = MEMORY_DIR.parent / "claude-archive"
 # журнал всех входящих и исходящих сообщений, по файлу на день
 HISTORY_DIR = MEMORY_DIR.parent / "history"
+# корень второго мозга: память, заметки, задачи, журнал, архив
+BRAIN_DIR = MEMORY_DIR.parent
+NOTES_DIR = BRAIN_DIR / "notes"
+TASKS_FILE = BRAIN_DIR / "tasks.md"
+SCHEDULES_FILE = BRAIN_DIR / "schedules.json"
 # сюда кладутся папки тем, созданных ботом
 PROJECTS_DIR = Path(os.path.expanduser(os.environ.get("PROJECTS_DIR", "~/projects")))
 
@@ -83,6 +93,13 @@ MEMORY_PROMPT = """
 - {history} — полный журнал всех сообщений с пользователем во всех темах, файл на каждый день (ГГГГ-ММ-ДД.md). Если нужно вспомнить, о чём говорили раньше или в другой теме, — ищи там через Grep.
 - {archive} — архив прошлых чатов и проектов пользователя из claude.ai (index.md — оглавление, chats/ — чаты, projects/ — проекты). Если вопрос может касаться прошлых разговоров («мы обсуждали…», «что я решил про…») — ищи там через Grep.
 
+Структура второго мозга — папка {brain}. Файлы в ней меняй только инструментами Write и Edit (не через Bash) — так это происходит без вопросов к пользователю:
+- {tasks} — задачи. Формат строки: «- [ ] задача (срок: ГГГГ-ММ-ДД) #проект», выполненные — «- [x]». Когда пользователь говорит «надо», «не забыть», «сделать» — добавь задачу; если есть срок и время — предложи напоминание. Когда сделал — отмечай.
+- {notes}/ — заметки и знания: inbox.md (быстрые мысли без темы), ideas.md (идеи), links.md (ссылки: дата, ссылка, 1–2 строки о чём), people.md (люди: кто, контакты, о чём договорились), остальное — отдельными файлами по темам. Если пользователь прислал ссылку без вопроса — прочитай, коротко перескажи и сохрани в links.md. Если прислал мысль/идею без вопроса — сохрани и коротко подтверди. Если переслал чужое сообщение — пойми, что с ним сделать (задача, контакт, заметка, встреча), сделай и коротко скажи.
+- Фото чеков, документов, визиток — разбери (Read умеет читать изображения) и сохрани важное в нужное место.
+
+Расписание: инструменты schedule_add / schedule_list / schedule_cancel. mode=remind — в нужное время просто прислать текст напоминания (prompt — сам текст напоминания); mode=task — в нужное время выполнить prompt как задание (например, собрать сводку, проверить почту, сделать дайджест каналов) и прислать результат. Разовое — параметр at (локальное время ГГГГ-ММ-ДДTЧЧ:ММ), повторяющееся — cron (например «0 8 * * *» каждый день в 8:00, «0 9 * * 1» по понедельникам). Время — по часовому поясу пользователя. В начале каждого сообщения пользователя стоит текущие дата и время.
+
 Google: инструменты gmail_*, calendar_*, drive_* дают доступ к почте, календарю и Диску пользователя. Пользуйся ими сам, когда вопрос их касается («что у меня завтра», «есть важные письма?», «найди договор»). Письма отправляй и события создавай/удаляй только по явной просьбе — пользователь подтвердит кнопкой. Если Google не подключён, скажи отправить /google.
 
 Работа с темами Telegram: инструмент create_topic создаёт новую тему (ветку) в группе со своей папкой проекта, list_topics показывает существующие. Когда просят создать темы или ветки под проекты — используй их.
@@ -93,6 +110,7 @@ Google: инструменты gmail_*, calendar_*, drive_* дают досту�
 TOOL_LABELS = {
     "WebSearch": "🔎 Ищу", "WebFetch": "🌐 Открываю", "Bash": "💻 Команда",
     "Read": "📖 Читаю", "mcp__telegram__create_topic": "🧵 Создаю тему",
+    "mcp__telegram__schedule_add": "⏰ Планирую", "mcp__telegram__schedule_cancel": "🗑 Отменяю",
     "mcp__google__gmail_search": "📬 Смотрю почту", "mcp__google__gmail_read": "📧 Читаю письмо",
     "mcp__google__gmail_draft": "📝 Черновик письма", "mcp__google__gmail_send": "📤 Отправляю письмо",
     "mcp__google__calendar_events": "📅 Смотрю календарь", "mcp__google__calendar_create": "📅 Создаю событие",
@@ -100,7 +118,7 @@ TOOL_LABELS = {
     "mcp__google__drive_search": "🗂 Ищу на Диске", "mcp__google__drive_read": "📄 Читаю файл", "Write": "📝 Пишу", "Edit": "✏️ Правлю", "Glob": "📂 Ищу файлы", "Grep": "🔍 Ищу в файлах",
 }
 # служебные шаги, которые пользователю показывать незачем
-HIDDEN_TOOLS = {"ToolSearch", "TodoWrite", "mcp__telegram__list_topics"}
+HIDDEN_TOOLS = {"ToolSearch", "TodoWrite", "mcp__telegram__list_topics", "mcp__telegram__schedule_list"}
 VOICE_MARKER = "[VOICE]"
 VOICE_INPUT_NOTE = "(голосовое сообщение — ответ будет озвучен)"
 TTS_VOICE = os.environ.get("TTS_VOICE", "ru-RU-DmitryNeural")
@@ -125,6 +143,7 @@ def save_state() -> None:
 
 
 state = load_state()
+scheduler = Scheduler(SCHEDULES_FILE, google_tools.TIMEZONE)
 
 
 def topic_key(message: Message) -> str:
@@ -162,19 +181,20 @@ def memory_prompt() -> str:
     memory = MEMORY_FILE.read_text(encoding="utf-8")
     if len(memory) > 20000:
         memory = memory[:20000] + "\n…(файл длиннее — дочитай при необходимости)"
-    return MEMORY_PROMPT.format(memory_file=MEMORY_FILE, memory=memory, archive=CLAUDE_ARCHIVE, history=HISTORY_DIR)
+    return MEMORY_PROMPT.format(memory_file=MEMORY_FILE, memory=memory, archive=CLAUDE_ARCHIVE, history=HISTORY_DIR,
+                                brain=BRAIN_DIR, tasks=TASKS_FILE, notes=NOTES_DIR)
 
 
 def is_memory_write(tool_name: str, tool_input: dict, cwd: str) -> bool:
     if tool_name not in ("Write", "Edit", "MultiEdit") or "file_path" not in tool_input:
         return False
     path = Path(tool_input["file_path"]).expanduser().resolve()
-    return path.is_relative_to(MEMORY_DIR.resolve()) or path == Path(cwd).resolve() / "CLAUDE.md"
+    return path.is_relative_to(BRAIN_DIR.resolve()) or path == Path(cwd).resolve() / "CLAUDE.md"
 
 
 # ---------- инструменты Telegram для Claude ----------
 
-def telegram_tools(chat_id: int):
+def telegram_tools(chat_id: int, thread_id: int | None):
     @tool("create_topic", "Создать новую тему (ветку) в группе Telegram с отдельной папкой проекта.",
           {"name": str})
     async def create_topic(args):
@@ -199,7 +219,31 @@ def telegram_tools(chat_id: int):
                 for k, v in state.items() if k.startswith(f"{chat_id}:")]
         return {"content": [{"type": "text", "text": "\n".join(rows) or "Тем пока нет."}]}
 
-    return create_sdk_mcp_server(name="telegram", tools=[create_topic, list_topics])
+    @tool("schedule_add", "Запланировать напоминание (mode=remind) или задание (mode=task) в этой теме. "
+          "at — разовое время ГГГГ-ММ-ДДTЧЧ:ММ (иначе пустая строка), cron — повторение (иначе пустая строка). "
+          "voice=true — прислать голосом.",
+          {"title": str, "prompt": str, "mode": str, "at": str, "cron": str, "voice": bool})
+    async def schedule_add(args):
+        try:
+            job = scheduler.add(title=args["title"], prompt=args["prompt"], mode=args["mode"],
+                                chat_id=chat_id, thread_id=thread_id, at=args.get("at", ""),
+                                cron=args.get("cron", ""), voice=bool(args.get("voice")))
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Не получилось: {e}"}], "is_error": True}
+        nxt = datetime.fromisoformat(job["next"]).strftime("%d.%m.%Y %H:%M")
+        return {"content": [{"type": "text", "text": f"Запланировано [{job['id']}], ближайший раз {nxt}"}]}
+
+    @tool("schedule_list", "Показать запланированные напоминания и задания.", {})
+    async def schedule_list(args):
+        return {"content": [{"type": "text", "text": scheduler.describe()}]}
+
+    @tool("schedule_cancel", "Отменить запланированное по id.", {"id": str})
+    async def schedule_cancel(args):
+        ok = scheduler.cancel(args["id"])
+        return {"content": [{"type": "text", "text": "Отменено." if ok else "Не нашёл такое задание."}]}
+
+    return create_sdk_mcp_server(name="telegram", tools=[
+        create_topic, list_topics, schedule_add, schedule_list, schedule_cancel])
 
 
 # ---------- сессии Claude, по одной на тему ----------
@@ -222,14 +266,14 @@ class TopicSession:
                 model=CLAUDE_MODEL,
                 system_prompt={"type": "preset", "preset": "claude_code",
                                "append": SYSTEM_PROMPT_APPEND + memory_prompt()},
-                add_dirs=[MEMORY_DIR, CLAUDE_ARCHIVE, HISTORY_DIR],
+                add_dirs=[BRAIN_DIR],
                 mcp_servers={
-                    "telegram": telegram_tools(self.chat_id),
+                    "telegram": telegram_tools(self.chat_id, self.thread_id),
                     **({"google": google_tools.google_server()} if google_tools.configured() else {}),
                 },
                 setting_sources=["user", "project", "local"],
-                permission_mode="bypassPermissions" if PERMISSIONS == "auto" else "default",
-                can_use_tool=None if PERMISSIONS == "auto" else self.ask_permission,
+                permission_mode="bypassPermissions" if permissions_mode() == "auto" else "default",
+                can_use_tool=None if permissions_mode() == "auto" else self.ask_permission,
             )
             self.client = ClaudeSDKClient(options)
             await self.client.connect()
@@ -278,10 +322,26 @@ pending_permissions: dict[str, asyncio.Future] = {}
 
 
 def get_session(message: Message) -> TopicSession:
-    key = topic_key(message)
+    return session_for(message.chat.id, message.message_thread_id)
+
+
+def session_for(chat_id: int, thread_id: int | None) -> TopicSession:
+    key = f"{chat_id}:{thread_id or 0}"
     if key not in sessions:
-        sessions[key] = TopicSession(key, message.chat.id, message.message_thread_id)
+        sessions[key] = TopicSession(key, chat_id, thread_id)
     return sessions[key]
+
+
+def permissions_mode() -> str:
+    return state.get("_settings", {}).get("permissions", PERMISSIONS)
+
+
+WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+
+def now_stamp() -> str:
+    now = scheduler.now()
+    return f"[Сейчас {now:%Y-%m-%d %H:%M}, {WEEKDAYS[now.weekday()]}, {google_tools.TIMEZONE}]"
 
 
 def describe_tool(name: str, tool_input: dict, limit: int = 200) -> str:
@@ -293,6 +353,8 @@ def describe_tool(name: str, tool_input: dict, limit: int = 200) -> str:
         text = tool_input.get("url", "")
     elif name == "mcp__telegram__create_topic":
         text = tool_input.get("name", "")
+    elif name == "mcp__telegram__schedule_add":
+        text = f"{tool_input.get('title')} ({tool_input.get('at') or tool_input.get('cron')})"
     elif name.startswith("mcp__google__") and limit < 1000:
         text = tool_input.get("query") or tool_input.get("title") or tool_input.get("to") or ""
     elif name in ("mcp__google__gmail_send", "mcp__google__gmail_draft"):
@@ -325,6 +387,13 @@ async def ask_claude(message: Message, prompt: str, voice: bool = False) -> None
     session = get_session(message)
     if session.lock.locked():
         await message.reply("⏳ Ещё работаю над прошлым сообщением, это поставил в очередь.")
+    await run_claude(session, prompt, voice)
+
+
+async def run_claude(session: TopicSession, prompt: str, voice: bool = False, who: str | None = None) -> None:
+    async def reply(text: str) -> None:
+        await bot.send_message(session.chat_id, text, message_thread_id=session.thread_id)
+
     async with session.lock:
         typing = asyncio.create_task(
             keep_typing(session.chat_id, session.thread_id, "record_voice" if voice else "typing")
@@ -332,10 +401,10 @@ async def ask_claude(message: Message, prompt: str, voice: bool = False) -> None
         status: Message | None = None
         steps: list[str] = []
         spoken: list[str] = []
-        record(session.key, "🙋 Я (голос)" if voice else "🙋 Я", prompt.removeprefix(VOICE_INPUT_NOTE))
+        record(session.key, who or ("🙋 Я (голос)" if voice else "🙋 Я"), prompt.removeprefix(VOICE_INPUT_NOTE))
         try:
             client = await session.ensure_client()
-            await client.query(prompt)
+            await client.query(f"{now_stamp()}\n{prompt}")
             async for msg in client.receive_response():
                 if isinstance(msg, AssistantMessage):
                     for block in msg.content:
@@ -370,7 +439,7 @@ async def ask_claude(message: Message, prompt: str, voice: bool = False) -> None
                     ts["session_id"] = msg.session_id
                     save_state()
                     if msg.is_error:
-                        await message.reply(f"⚠️ Ошибка: {msg.result or msg.subtype}")
+                        await reply(f"⚠️ Ошибка: {msg.result or msg.subtype}")
             if spoken:
                 record(session.key, "🧠 Бот (голос)", "\n\n".join(spoken))
                 await send_voice_reply(session.chat_id, session.thread_id, "\n\n".join(spoken))
@@ -378,7 +447,7 @@ async def ask_claude(message: Message, prompt: str, voice: bool = False) -> None
             log.exception("claude call failed")
             await session.reset()
             record(session.key, "⚠️ Ошибка", str(e))
-            await message.reply(f"⚠️ Не получилось: {e}")
+            await reply(f"⚠️ Не получилось: {e}")
         finally:
             typing.cancel()
 
@@ -477,16 +546,75 @@ async def only_owner(handler, event: Message, data):
 async def cmd_help(message: Message):
     ts = topic_state(topic_key(message))
     await message.reply(
-        "🧠 Второй мозг на связи.\n\n"
-        "Пишите текстом или голосом — я работаю на вашем компьютере.\n"
-        "Каждая тема группы — отдельный проект со своей памятью.\n\n"
-        "/project <путь> — привязать эту тему к папке проекта\n"
+        "🧠 Второй мозг на связи. Пишите текстом или голосом.\n\n"
+        "Что можно просить:\n"
+        "- любые вопросы, поиск в интернете, погода, новости\n"
+        "- «напомни завтра в 10 позвонить маме», «каждое утро в 8 присылай сводку»\n"
+        "- «надо купить подарок до пятницы» — запишу в задачи\n"
+        "- идеи, мысли, ссылки, пересланные сообщения, фото чеков — разберу и сохраню\n"
+        "- почта, календарь, Google Диск (после /google)\n"
+        "- «создай темы для проектов: …»\n"
+        "- «что мы решили про…» — найду в памяти и журнале\n\n"
+        "Команды:\n"
+        "/brief — сводка на сегодня\n"
+        "/tasks — мои задачи\n"
+        "/schedule — что запланировано\n"
         "/new — начать разговор в теме заново\n"
         "/stop — прервать текущую задачу\n"
-        "/where — показать папку и сессию темы\n"
-        "/id — показать ваш Telegram ID\n\n"
+        "/mode — спрашивать ли подтверждение действий\n"
+        "/backup — прислать архив памяти\n"
+        "/google — подключить почту и календарь\n"
+        "/project <путь> — привязать тему к папке\n\n"
         f"Папка этой темы: {ts['cwd']}"
     )
+
+
+BRIEF_PROMPT = (
+    "Сделай мою сводку на сегодня, коротко и по делу: события календаря на сегодня и завтра утром; "
+    "важные непрочитанные письма за последние сутки (рассылки и спам пропусти); погода на сегодня в моём "
+    "городе; задачи из списка задач — просроченные и на сегодня. Если Google не подключён, пропусти почту "
+    "и календарь без лишних слов. В конце — одна мысль, на чём сфокусироваться."
+)
+
+
+@dp.message(Command("brief"))
+async def cmd_brief(message: Message):
+    await ask_claude(message, BRIEF_PROMPT)
+
+
+@dp.message(Command("tasks"))
+async def cmd_tasks(message: Message):
+    await ask_claude(message, "Покажи мои открытые задачи, сгруппируй по срокам: просроченные, сегодня, "
+                              "на неделе, без срока.")
+
+
+@dp.message(Command("schedule"))
+async def cmd_schedule(message: Message):
+    await message.reply("🗓 Запланировано:\n" + scheduler.describe() +
+                        "\n\nОтменить: «отмени напоминание …» или «отмени задание [id]».")
+
+
+@dp.message(Command("mode"))
+async def cmd_mode(message: Message, command: CommandObject):
+    arg = (command.args or "").strip().lower()
+    if arg not in ("auto", "ask"):
+        await message.reply(
+            f"Сейчас: {permissions_mode()}.\n\n"
+            "/mode ask — спрашивать подтверждение перед командами, изменением файлов, отправкой писем\n"
+            "/mode auto — делать всё без вопросов (быстрее, но бот сможет отправить письмо или удалить файл сам)"
+        )
+        return
+    state.setdefault("_settings", {})["permissions"] = arg
+    save_state()
+    for sess in sessions.values():
+        if not sess.lock.locked():
+            await sess.reset()
+    await message.reply("✅ Режим: " + ("без вопросов" if arg == "auto" else "с подтверждением"))
+
+
+@dp.message(Command("backup"))
+async def cmd_backup(message: Message):
+    await send_backup(message.chat.id, message.message_thread_id)
 
 
 @dp.message(Command("google"))
@@ -623,7 +751,82 @@ async def on_text(message: Message):
                 await s.reset()
         await message.reply("✅ Google подключён: почта, календарь и Диск доступны.")
         return
-    await ask_claude(message, message.text)
+    text = message.text
+    origin = forward_label(message)
+    if origin:
+        text = f"[Пересланное сообщение от {origin}]\n{text}"
+    await ask_claude(message, text)
+
+
+def forward_label(message: Message) -> str | None:
+    o = message.forward_origin
+    if o is None:
+        return None
+    for attr in ("sender_user", "sender_chat", "chat"):
+        obj = getattr(o, attr, None)
+        if obj is not None:
+            name = getattr(obj, "full_name", None) or getattr(obj, "title", None) or "?"
+            username = getattr(obj, "username", None)
+            return f"{name} (@{username})" if username else name
+    return getattr(o, "sender_user_name", None) or "неизвестного"
+
+
+# ---------- расписание и бэкап ----------
+
+async def scheduler_loop() -> None:
+    while True:
+        try:
+            for job in scheduler.due():
+                asyncio.create_task(run_job(job))
+        except Exception:
+            log.exception("scheduler tick failed")
+        await asyncio.sleep(20)
+
+
+async def run_job(job: dict) -> None:
+    chat_id, thread_id = job["chat_id"], job["thread_id"]
+    try:
+        if job["mode"] == "backup":
+            await send_backup(chat_id, thread_id)
+        elif job["mode"] == "remind":
+            record(f"{chat_id}:{thread_id or 0}", "⏰ Напоминание", job["prompt"])
+            if job.get("voice"):
+                await send_voice_reply(chat_id, thread_id, job["prompt"])
+            else:
+                await bot.send_message(chat_id, f"⏰ {job['prompt']}", message_thread_id=thread_id)
+        else:
+            prompt = f"[Запланированное задание «{job['title']}»]\n{job['prompt']}"
+            if job.get("voice"):
+                prompt = f"{VOICE_INPUT_NOTE}\n\n{prompt}"
+            await run_claude(session_for(chat_id, thread_id), prompt, voice=bool(job.get("voice")),
+                             who="🗓 Расписание")
+    except Exception:
+        log.exception("job %s failed", job["id"])
+
+
+async def send_backup(chat_id: int, thread_id: int | None) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        stamp = scheduler.now().strftime("%Y-%m-%d")
+        staging = Path(tmp) / "second-brain"
+        await asyncio.to_thread(shutil.copytree, BRAIN_DIR, staging, dirs_exist_ok=True)
+        if STATE_FILE.exists():
+            shutil.copy(STATE_FILE, staging / "bot_state.json")
+        archive = await asyncio.to_thread(shutil.make_archive, str(Path(tmp) / f"second-brain-{stamp}"),
+                                          "zip", tmp, "second-brain")
+        size_mb = Path(archive).stat().st_size / 1024 / 1024
+        if size_mb > 49:
+            await bot.send_message(chat_id, f"⚠️ Архив памяти {size_mb:.0f} МБ — больше лимита Telegram (50 МБ). "
+                                            "Скачайте папку ~/second-brain с сервера вручную.",
+                                   message_thread_id=thread_id)
+            return
+        await bot.send_document(chat_id, FSInputFile(archive), message_thread_id=thread_id,
+                                caption=f"🗄 Бэкап второго мозга за {stamp} ({size_mb:.1f} МБ)")
+
+
+def ensure_default_jobs() -> None:
+    if not any(j["mode"] == "backup" for j in scheduler.jobs):
+        scheduler.add(title="Еженедельный бэкап", prompt="", mode="backup", chat_id=OWNER_ID,
+                      thread_id=None, cron="0 21 * * 0")
 
 
 @dp.callback_query(F.data.startswith("perm:"))
@@ -648,6 +851,12 @@ async def main() -> None:
     log.info("Второй мозг запущен. Разрешённые пользователи: %s", ALLOWED_USER_IDS)
     # модель распознавания грузим заранее, чтобы первое голосовое не ждало скачивания
     asyncio.get_running_loop().run_in_executor(None, preload_whisper)
+    BRAIN_DIR.mkdir(parents=True, exist_ok=True)
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    if not TASKS_FILE.exists():
+        TASKS_FILE.write_text("# Задачи\n\n", encoding="utf-8")
+    ensure_default_jobs()
+    asyncio.create_task(scheduler_loop())
     await dp.start_polling(bot)
 
 
