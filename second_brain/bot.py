@@ -34,6 +34,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import google_tools  # noqa: E402 — читает переменные из .env
+from import_claude_export import import_export  # noqa: E402
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED_USER_IDS = {int(x) for x in os.environ["ALLOWED_USER_IDS"].split(",") if x.strip()}
@@ -47,6 +48,8 @@ STATE_FILE = Path(__file__).with_name("state.json")
 # долговременная память: общий файл о пользователе, виден из всех тем
 MEMORY_DIR = Path(os.path.expanduser(os.environ.get("MEMORY_DIR", "~/second-brain/memory")))
 MEMORY_FILE = MEMORY_DIR / "about.md"
+# архив чатов и проектов из экспорта claude.ai
+CLAUDE_ARCHIVE = MEMORY_DIR.parent / "claude-archive"
 # сюда кладутся папки тем, созданных ботом
 PROJECTS_DIR = Path(os.path.expanduser(os.environ.get("PROJECTS_DIR", "~/projects")))
 
@@ -72,6 +75,8 @@ MEMORY_PROMPT = """
 - {memory_file} — общая память о пользователе для всех тем: кто он, где живёт, чем занимается, люди вокруг, цели, предпочтения, договорённости. Когда узнаёшь что-то устойчивое или пользователь просит «запомни» — сразу допиши это туда кратко, без дублей; устаревшее исправляй. Если спрашивают, что ты помнишь, — прочитай файл заново.
 - CLAUDE.md в папке текущей темы — память этого проекта: цели, решения, статус, следующие шаги. Обновляй его, когда в проекте что-то решили или поменялось. Он подгружается автоматически в начале разговора.
 Изменения этих файлов разрешены без вопросов. Не сообщай о каждом сохранении — максимум коротко «запомнил».
+
+- {archive} — архив прошлых чатов и проектов пользователя из claude.ai (index.md — оглавление, chats/ — чаты, projects/ — проекты). Если вопрос может касаться прошлых разговоров («мы обсуждали…», «что я решил про…») — ищи там через Grep.
 
 Google: инструменты gmail_*, calendar_*, drive_* дают доступ к почте, календарю и Диску пользователя. Пользуйся ими сам, когда вопрос их касается («что у меня завтра», «есть важные письма?», «найди договор»). Письма отправляй и события создавай/удаляй только по явной просьбе — пользователь подтвердит кнопкой. Если Google не подключён, скажи отправить /google.
 
@@ -138,7 +143,7 @@ def memory_prompt() -> str:
     memory = MEMORY_FILE.read_text(encoding="utf-8")
     if len(memory) > 20000:
         memory = memory[:20000] + "\n…(файл длиннее — дочитай при необходимости)"
-    return MEMORY_PROMPT.format(memory_file=MEMORY_FILE, memory=memory)
+    return MEMORY_PROMPT.format(memory_file=MEMORY_FILE, memory=memory, archive=CLAUDE_ARCHIVE)
 
 
 def is_memory_write(tool_name: str, tool_input: dict, cwd: str) -> bool:
@@ -198,7 +203,7 @@ class TopicSession:
                 model=CLAUDE_MODEL,
                 system_prompt={"type": "preset", "preset": "claude_code",
                                "append": SYSTEM_PROMPT_APPEND + memory_prompt()},
-                add_dirs=[MEMORY_DIR],
+                add_dirs=[MEMORY_DIR, CLAUDE_ARCHIVE],
                 mcp_servers={
                     "telegram": telegram_tools(self.chat_id),
                     **({"google": google_tools.google_server()} if google_tools.configured() else {}),
@@ -543,6 +548,21 @@ async def on_voice(message: Message):
     await ask_claude(message, f"{VOICE_INPUT_NOTE}\n\n{text}", voice=True)
 
 
+async def import_if_claude_export(message: Message, path: Path) -> bool:
+    try:
+        summary = await asyncio.to_thread(import_export, path, CLAUDE_ARCHIVE)
+    except ValueError:
+        return False  # обычный zip, не экспорт claude.ai
+    await message.reply(f"📦 Архив claude.ai загружен на сервер.\n{summary}\n\nТеперь соберу из него память…")
+    await ask_claude(message, (
+        f"Я загрузил экспорт своих данных из claude.ai в {CLAUDE_ARCHIVE}. Прочитай index.md, файлы памяти "
+        f"Claude, если они есть в архиве (json-файлы в корне), и README.md проектов. Перенеси в {MEMORY_FILE} "
+        "устойчивые факты обо мне: кто я, чем занимаюсь, проекты, люди, предпочтения. Чаты целиком не читай — "
+        "только то, что нужно. В конце коротко скажи, что запомнил и какие проекты нашёл."
+    ))
+    return True
+
+
 @dp.message(F.document | F.photo)
 async def on_file(message: Message):
     ts = topic_state(topic_key(message))
@@ -550,7 +570,14 @@ async def on_file(message: Message):
     inbox.mkdir(parents=True, exist_ok=True)
     if message.document:
         dest = inbox / message.document.file_name
-        await bot.download(message.document, destination=dest)
+        try:
+            await bot.download(message.document, destination=dest)
+        except Exception as e:
+            await message.reply(f"⚠️ Не смог скачать файл: {e}\nTelegram отдаёт ботам файлы до 20 МБ. "
+                                "Большой файл загрузите на Google Диск, откройте доступ по ссылке и пришлите ссылку.")
+            return
+        if dest.suffix.lower() == ".zip" and await import_if_claude_export(message, dest):
+            return
     else:
         dest = inbox / f"photo_{message.message_id}.jpg"
         await bot.download(message.photo[-1], destination=dest)
