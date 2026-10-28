@@ -33,6 +33,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import google_tools  # noqa: E402 — читает переменные из .env
+
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED_USER_IDS = {int(x) for x in os.environ["ALLOWED_USER_IDS"].split(",") if x.strip()}
 DEFAULT_CWD = os.path.expanduser(os.environ.get("DEFAULT_CWD", "~"))
@@ -71,6 +73,8 @@ MEMORY_PROMPT = """
 - CLAUDE.md в папке текущей темы — память этого проекта: цели, решения, статус, следующие шаги. Обновляй его, когда в проекте что-то решили или поменялось. Он подгружается автоматически в начале разговора.
 Изменения этих файлов разрешены без вопросов. Не сообщай о каждом сохранении — максимум коротко «запомнил».
 
+Google: инструменты gmail_*, calendar_*, drive_* дают доступ к почте, календарю и Диску пользователя. Пользуйся ими сам, когда вопрос их касается («что у меня завтра», «есть важные письма?», «найди договор»). Письма отправляй и события создавай/удаляй только по явной просьбе — пользователь подтвердит кнопкой. Если Google не подключён, скажи отправить /google.
+
 Работа с темами Telegram: инструмент create_topic создаёт новую тему (ветку) в группе со своей папкой проекта, list_topics показывает существующие. Когда просят создать темы или ветки под проекты — используй их.
 
 Текущее содержимое общей памяти:
@@ -78,7 +82,12 @@ MEMORY_PROMPT = """
 """
 TOOL_LABELS = {
     "WebSearch": "🔎 Ищу", "WebFetch": "🌐 Открываю", "Bash": "💻 Команда",
-    "Read": "📖 Читаю", "mcp__telegram__create_topic": "🧵 Создаю тему", "Write": "📝 Пишу", "Edit": "✏️ Правлю", "Glob": "📂 Ищу файлы", "Grep": "🔍 Ищу в файлах",
+    "Read": "📖 Читаю", "mcp__telegram__create_topic": "🧵 Создаю тему",
+    "mcp__google__gmail_search": "📬 Смотрю почту", "mcp__google__gmail_read": "📧 Читаю письмо",
+    "mcp__google__gmail_draft": "📝 Черновик письма", "mcp__google__gmail_send": "📤 Отправляю письмо",
+    "mcp__google__calendar_events": "📅 Смотрю календарь", "mcp__google__calendar_create": "📅 Создаю событие",
+    "mcp__google__calendar_delete": "🗑 Удаляю событие",
+    "mcp__google__drive_search": "🗂 Ищу на Диске", "mcp__google__drive_read": "📄 Читаю файл", "Write": "📝 Пишу", "Edit": "✏️ Правлю", "Glob": "📂 Ищу файлы", "Grep": "🔍 Ищу в файлах",
 }
 # служебные шаги, которые пользователю показывать незачем
 HIDDEN_TOOLS = {"ToolSearch", "TodoWrite", "mcp__telegram__list_topics"}
@@ -190,7 +199,10 @@ class TopicSession:
                 system_prompt={"type": "preset", "preset": "claude_code",
                                "append": SYSTEM_PROMPT_APPEND + memory_prompt()},
                 add_dirs=[MEMORY_DIR],
-                mcp_servers={"telegram": telegram_tools(self.chat_id)},
+                mcp_servers={
+                    "telegram": telegram_tools(self.chat_id),
+                    **({"google": google_tools.google_server()} if google_tools.configured() else {}),
+                },
                 setting_sources=["user", "project", "local"],
                 permission_mode="bypassPermissions" if PERMISSIONS == "auto" else "default",
                 can_use_tool=None if PERMISSIONS == "auto" else self.ask_permission,
@@ -208,7 +220,8 @@ class TopicSession:
             self.client = None
 
     async def ask_permission(self, tool_name, tool_input, context):
-        if (tool_name in SAFE_TOOLS or tool_name.startswith("mcp__telegram__")
+        if (tool_name in SAFE_TOOLS or tool_name in google_tools.SAFE_GOOGLE_TOOLS
+                or tool_name.startswith("mcp__telegram__")
                 or is_memory_write(tool_name, tool_input, topic_state(self.key)["cwd"])):
             return PermissionResultAllow()
         request_id = uuid.uuid4().hex[:12]
@@ -220,7 +233,8 @@ class TopicSession:
         ]])
         await bot.send_message(
             self.chat_id,
-            f"🔐 Claude хочет выполнить {tool_name}:\n\n{describe_tool(tool_name, tool_input, 1500)}",
+            f"🔐 Подтвердите — {TOOL_LABELS.get(tool_name, tool_name)}:\n\n"
+            f"{describe_tool(tool_name, tool_input, 1500)}",
             message_thread_id=self.thread_id,
             reply_markup=keyboard,
         )
@@ -255,6 +269,13 @@ def describe_tool(name: str, tool_input: dict, limit: int = 200) -> str:
         text = tool_input.get("url", "")
     elif name == "mcp__telegram__create_topic":
         text = tool_input.get("name", "")
+    elif name.startswith("mcp__google__") and limit < 1000:
+        text = tool_input.get("query") or tool_input.get("title") or tool_input.get("to") or ""
+    elif name in ("mcp__google__gmail_send", "mcp__google__gmail_draft"):
+        text = f"Кому: {tool_input.get('to')}\nТема: {tool_input.get('subject')}\n\n{tool_input.get('body')}"
+    elif name == "mcp__google__calendar_create":
+        text = (f"{tool_input.get('title')}\n{tool_input.get('start')} → {tool_input.get('end')}"
+                f"\n{tool_input.get('location') or ''}")
     elif "file_path" in tool_input:
         text = tool_input["file_path"]
     else:
@@ -439,6 +460,22 @@ async def cmd_help(message: Message):
     )
 
 
+@dp.message(Command("google"))
+async def cmd_google(message: Message):
+    if not google_tools.configured():
+        await message.reply("Сначала впишите GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET в .env на сервере "
+                            "и перезапустите бота.")
+        return
+    await message.reply(
+        "🔑 Подключение Google:\n\n"
+        "1. Откройте ссылку ниже и войдите в свой Google-аккаунт.\n"
+        "2. Если Google предупредит, что приложение не проверено, — «Дополнительно» → «Перейти».\n"
+        "3. Разрешите доступ. Браузер откроет страницу localhost, которая не загрузится, — так и должно быть.\n"
+        "4. Скопируйте адрес этой страницы целиком (начинается с http://localhost) и пришлите мне.\n\n"
+        + google_tools.auth_url()
+    )
+
+
 @dp.message(Command("id"))
 async def cmd_id(message: Message):
     await message.reply(f"Ваш ID: {message.from_user.id}\nЧат: {message.chat.id}")
@@ -523,6 +560,18 @@ async def on_file(message: Message):
 
 @dp.message(F.text)
 async def on_text(message: Message):
+    if google_tools.is_auth_redirect(message.text):
+        try:
+            await asyncio.to_thread(google_tools.finish_auth, message.text)
+        except Exception as e:
+            await message.reply(f"⚠️ Не получилось подключить Google: {e}")
+            return
+        # пересоздаём сессии, чтобы инструменты Google подхватили доступ
+        for s in sessions.values():
+            if not s.lock.locked():
+                await s.reset()
+        await message.reply("✅ Google подключён: почта, календарь и Диск доступны.")
+        return
     await ask_claude(message, message.text)
 
 
