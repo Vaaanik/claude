@@ -12,7 +12,9 @@ import re
 import tempfile
 import threading
 import uuid
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
@@ -50,6 +52,8 @@ MEMORY_DIR = Path(os.path.expanduser(os.environ.get("MEMORY_DIR", "~/second-brai
 MEMORY_FILE = MEMORY_DIR / "about.md"
 # архив чатов и проектов из экспорта claude.ai
 CLAUDE_ARCHIVE = MEMORY_DIR.parent / "claude-archive"
+# журнал всех входящих и исходящих сообщений, по файлу на день
+HISTORY_DIR = MEMORY_DIR.parent / "history"
 # сюда кладутся папки тем, созданных ботом
 PROJECTS_DIR = Path(os.path.expanduser(os.environ.get("PROJECTS_DIR", "~/projects")))
 
@@ -76,6 +80,7 @@ MEMORY_PROMPT = """
 - CLAUDE.md в папке текущей темы — память этого проекта: цели, решения, статус, следующие шаги. Обновляй его, когда в проекте что-то решили или поменялось. Он подгружается автоматически в начале разговора.
 Изменения этих файлов разрешены без вопросов. Не сообщай о каждом сохранении — максимум коротко «запомнил».
 
+- {history} — полный журнал всех сообщений с пользователем во всех темах, файл на каждый день (ГГГГ-ММ-ДД.md). Если нужно вспомнить, о чём говорили раньше или в другой теме, — ищи там через Grep.
 - {archive} — архив прошлых чатов и проектов пользователя из claude.ai (index.md — оглавление, chats/ — чаты, projects/ — проекты). Если вопрос может касаться прошлых разговоров («мы обсуждали…», «что я решил про…») — ищи там через Grep.
 
 Google: инструменты gmail_*, calendar_*, drive_* дают доступ к почте, календарю и Диску пользователя. Пользуйся ими сам, когда вопрос их касается («что у меня завтра», «есть важные письма?», «найди договор»). Письма отправляй и события создавай/удаляй только по явной просьбе — пользователь подтвердит кнопкой. Если Google не подключён, скажи отправить /google.
@@ -134,6 +139,20 @@ def slugify(name: str) -> str:
     return re.sub(r"[^\w-]+", "-", name.lower()).strip("-") or "project"
 
 
+# ---------- журнал сообщений ----------
+
+def record(key: str, who: str, text: str) -> None:
+    """Дописывает сообщение в журнал дня на сервере. Сбой записи не должен ломать ответ."""
+    try:
+        now = datetime.now(ZoneInfo(google_tools.TIMEZONE))
+        topic = state.get(key, {}).get("name") or ("личка" if not key.startswith("-") else f"тема {key.split(':')[1]}")
+        HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+        with open(HISTORY_DIR / f"{now:%Y-%m-%d}.md", "a", encoding="utf-8") as f:
+            f.write(f"### {now:%H:%M:%S} · {topic} · {who}\n{text.strip()}\n\n")
+    except Exception:
+        log.exception("history write failed")
+
+
 # ---------- память ----------
 
 def memory_prompt() -> str:
@@ -143,7 +162,7 @@ def memory_prompt() -> str:
     memory = MEMORY_FILE.read_text(encoding="utf-8")
     if len(memory) > 20000:
         memory = memory[:20000] + "\n…(файл длиннее — дочитай при необходимости)"
-    return MEMORY_PROMPT.format(memory_file=MEMORY_FILE, memory=memory, archive=CLAUDE_ARCHIVE)
+    return MEMORY_PROMPT.format(memory_file=MEMORY_FILE, memory=memory, archive=CLAUDE_ARCHIVE, history=HISTORY_DIR)
 
 
 def is_memory_write(tool_name: str, tool_input: dict, cwd: str) -> bool:
@@ -203,7 +222,7 @@ class TopicSession:
                 model=CLAUDE_MODEL,
                 system_prompt={"type": "preset", "preset": "claude_code",
                                "append": SYSTEM_PROMPT_APPEND + memory_prompt()},
-                add_dirs=[MEMORY_DIR, CLAUDE_ARCHIVE],
+                add_dirs=[MEMORY_DIR, CLAUDE_ARCHIVE, HISTORY_DIR],
                 mcp_servers={
                     "telegram": telegram_tools(self.chat_id),
                     **({"google": google_tools.google_server()} if google_tools.configured() else {}),
@@ -313,6 +332,7 @@ async def ask_claude(message: Message, prompt: str, voice: bool = False) -> None
         status: Message | None = None
         steps: list[str] = []
         spoken: list[str] = []
+        record(session.key, "🙋 Я (голос)" if voice else "🙋 Я", prompt.removeprefix(VOICE_INPUT_NOTE))
         try:
             client = await session.ensure_client()
             await client.query(prompt)
@@ -328,11 +348,13 @@ async def ask_claude(message: Message, prompt: str, voice: bool = False) -> None
                             if voice:
                                 spoken.append(text)
                             else:
+                                record(session.key, "🧠 Бот", text)
                                 await send_long(session.chat_id, session.thread_id, text)
                         elif isinstance(block, ToolUseBlock) and block.name not in HIDDEN_TOOLS:
                             # один статус-сообщение со списком шагов, чтобы не спамить
                             label = TOOL_LABELS.get(block.name, f"🔧 {block.name}")
                             steps.append(f"{label}: {describe_tool(block.name, block.input, 80)}")
+                            record(session.key, "⚙️ Действие", steps[-1])
                             text = "\n".join(steps[-8:])
                             if status is None:
                                 status = await bot.send_message(
@@ -350,10 +372,12 @@ async def ask_claude(message: Message, prompt: str, voice: bool = False) -> None
                     if msg.is_error:
                         await message.reply(f"⚠️ Ошибка: {msg.result or msg.subtype}")
             if spoken:
+                record(session.key, "🧠 Бот (голос)", "\n\n".join(spoken))
                 await send_voice_reply(session.chat_id, session.thread_id, "\n\n".join(spoken))
         except Exception as e:
             log.exception("claude call failed")
             await session.reset()
+            record(session.key, "⚠️ Ошибка", str(e))
             await message.reply(f"⚠️ Не получилось: {e}")
         finally:
             typing.cancel()
@@ -614,6 +638,8 @@ async def on_permission(callback: CallbackQuery):
         return
     allowed = decision == "1"
     future.set_result(allowed)
+    record(f"{callback.message.chat.id}:{callback.message.message_thread_id or 0}",
+           "✅ Разрешено" if allowed else "❌ Отклонено", callback.message.text)
     await callback.answer("Разрешено" if allowed else "Отклонено")
     await callback.message.edit_text(callback.message.text + ("\n\n✅ Разрешено" if allowed else "\n\n❌ Отклонено"))
 
