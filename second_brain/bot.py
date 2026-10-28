@@ -45,14 +45,25 @@ STATE_FILE = Path(__file__).with_name("state.json")
 SAFE_TOOLS = {"Read", "Glob", "Grep", "LS", "WebSearch", "WebFetch", "TodoWrite", "NotebookRead"}
 
 SYSTEM_PROMPT_APPEND = (
-    "Ты — «второй мозг» пользователя, с тобой общаются через Telegram. "
+    "Ты — «второй мозг» пользователя, с тобой общаются через Telegram. Ты универсальный ассистент: "
+    "отвечаешь на любые вопросы, а не только про код. Если нужны свежие данные (погода, новости, курсы, "
+    "цены, расписания) — найди их через WebSearch, а затем обязательно открой подходящую страницу через "
+    "WebFetch и дай конкретный ответ с цифрами. Не отправляй пользователя искать самому. "
+    "Для погоды удобно открыть https://wttr.in/<город>?format=j1&lang=ru через WebFetch. "
+    "Источник указывай одной ссылкой в конце, без раздела Sources со списком. "
     "Отвечай кратко и по делу, на языке пользователя. Telegram не рендерит Markdown-таблицы и заголовки, "
     "поэтому пиши простым текстом, списки — через дефис. Голосовые сообщения приходят расшифрованными "
     "и могут содержать ошибки распознавания — понимай по смыслу. "
     "На голосовые твой ответ озвучивается. Если в текстовом сообщении пользователь просит ответить голосом, "
     "начни ответ с метки [VOICE] — тогда он тоже будет озвучен. Озвучиваемый ответ пиши как живую речь: "
-    "коротко, без списков, разметки, эмодзи и ссылок."
+    "коротко, без списков, разметки, эмодзи, ссылок и раздела источников."
 )
+TOOL_LABELS = {
+    "WebSearch": "🔎 Ищу", "WebFetch": "🌐 Открываю", "Bash": "💻 Команда",
+    "Read": "📖 Читаю", "Write": "📝 Пишу", "Edit": "✏️ Правлю", "Glob": "📂 Ищу файлы", "Grep": "🔍 Ищу в файлах",
+}
+# служебные шаги, которые пользователю показывать незачем
+HIDDEN_TOOLS = {"ToolSearch", "TodoWrite"}
 VOICE_MARKER = "[VOICE]"
 VOICE_INPUT_NOTE = "(голосовое сообщение — ответ будет озвучен)"
 TTS_VOICE = os.environ.get("TTS_VOICE", "ru-RU-DmitryNeural")
@@ -163,6 +174,10 @@ def get_session(message: Message) -> TopicSession:
 def describe_tool(name: str, tool_input: dict, limit: int = 200) -> str:
     if name == "Bash":
         text = tool_input.get("command", "")
+    elif name == "WebSearch":
+        text = tool_input.get("query", "")
+    elif name == "WebFetch":
+        text = tool_input.get("url", "")
     elif "file_path" in tool_input:
         text = tool_input["file_path"]
     else:
@@ -211,9 +226,10 @@ async def ask_claude(message: Message, prompt: str, voice: bool = False) -> None
                                 spoken.append(text)
                             else:
                                 await send_long(session.chat_id, session.thread_id, text)
-                        elif isinstance(block, ToolUseBlock):
+                        elif isinstance(block, ToolUseBlock) and block.name not in HIDDEN_TOOLS:
                             # один статус-сообщение со списком шагов, чтобы не спамить
-                            steps.append(f"🔧 {block.name}: {describe_tool(block.name, block.input, 80)}")
+                            label = TOOL_LABELS.get(block.name, f"🔧 {block.name}")
+                            steps.append(f"{label}: {describe_tool(block.name, block.input, 80)}")
                             text = "\n".join(steps[-8:])
                             if status is None:
                                 status = await bot.send_message(
@@ -311,9 +327,11 @@ async def send_voice_reply(chat_id: int, thread_id: int | None, text: str) -> No
         log.exception("tts failed")
         await send_long(chat_id, thread_id, text)
         return
-    # код и ссылки голосом не передать — дублируем их текстом
-    if "```" in text or "http" in text:
-        await send_long(chat_id, thread_id, text)
+    # код и ссылки голосом не передать — присылаем только их текстом, без повтора всего ответа
+    extras = re.findall(r"```.*?```", text, flags=re.S)
+    extras += list(dict.fromkeys(re.findall(r"https?://[^\s)\]]+", text)))
+    if extras:
+        await send_long(chat_id, thread_id, "\n\n".join(extras))
 
 
 # ---------- доступ ----------
