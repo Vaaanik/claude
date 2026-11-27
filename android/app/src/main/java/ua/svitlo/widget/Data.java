@@ -13,38 +13,26 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-/** Загрузка статуса тревоги и графика отключений. */
+/** Разбор источников: Telegram-канал с тревогами и график ДТЭК. Без зависимостей от Android. */
 final class Data {
-    static final String ALERTS_URL = "https://ubilling.net.ua/aerialalerts/";
-    static final String SCHEDULE_URL =
-            "https://raw.githubusercontent.com/Baskerville42/outage-data-ua/main/data/dnipro.json";
+    static final String DEFAULT_CHANNEL = "sirena_kryvyi_rih";
+    static final String DTEK_URL = "https://www.dtek-dnem.com.ua/ua/shutdowns";
     static final ZoneId KYIV = ZoneId.of("Europe/Kiev");
-    private static final DateTimeFormatter HM = DateTimeFormatter.ofPattern("HH:mm");
+    static final DateTimeFormatter HM = DateTimeFormatter.ofPattern("HH:mm");
 
-    static final String[] REGIONS = {
-            "Дніпропетровська область", "Вінницька область", "Волинська область",
-            "Донецька область", "Житомирська область", "Закарпатська область",
-            "Запорізька область", "Івано-Франківська область", "Київська область",
-            "Кіровоградська область", "Луганська область", "Львівська область",
-            "Миколаївська область", "Одеська область", "Полтавська область",
-            "Рівненська область", "Сумська область", "Тернопільська область",
-            "Харківська область", "Херсонська область", "Хмельницька область",
-            "Черкаська область", "Чернівецька область", "Чернігівська область", "м. Київ"
-    };
-
-    /** Тревога: null — не удалось узнать. */
-    static final class Alert {
-        Boolean active;
-        String since = "";
-    }
+    // ------------------------------------------------------------------ сеть
 
     static String get(String url) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-        c.setConnectTimeout(4000);
-        c.setReadTimeout(4000);
-        c.setRequestProperty("User-Agent", "svitlo-widget");
+        c.setConnectTimeout(6000);
+        c.setReadTimeout(6000);
+        c.setUseCaches(false);
+        c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) Mobile");
         try (InputStream in = c.getInputStream()) {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             byte[] buf = new byte[8192];
@@ -56,75 +44,194 @@ final class Data {
         }
     }
 
-    static Alert alert(String region) {
-        Alert a = new Alert();
-        try {
-            JSONObject st = new JSONObject(get(ALERTS_URL)).getJSONObject("states").getJSONObject(region);
-            a.active = st.getBoolean("alertnow");
-        } catch (Exception e) {
-            a.active = null;
-        }
-        return a;
+    // --------------------------------------------------------------- тревога
+
+    /** Последнее сообщение канала, которое объявляет тревогу или отбой. */
+    static final class Post {
+        long id;          // номер сообщения в канале
+        boolean alert;    // true — тревога, false — отбой
+        long timeMs;      // когда опубликовано
+        String text = "";
     }
 
-    /** Одна строка о свете для группы, например "Свет есть · отключение 13:00–20:00". */
-    static String power(String group) {
-        try {
-            JSONObject fact = new JSONObject(get(SCHEDULE_URL)).getJSONObject("fact").getJSONObject("data");
-            String key = "GPV" + group;
-            ZonedDateTime now = ZonedDateTime.now(KYIV);
+    static final class Channel {
+        long lastId;      // самый свежий номер сообщения на странице (0 — постов нет)
+        Post last;        // последнее сообщение о тревоге/отбое, если есть
+    }
 
-            // Получасовые отрезки без света, склеенные через полночь.
-            TreeMap<Long, JSONObject> days = new TreeMap<>();
-            for (Iterator<String> it = fact.keys(); it.hasNext(); ) {
-                String ts = it.next();
-                days.put(Long.parseLong(ts), fact.getJSONObject(ts));
+    private static final Pattern POST = Pattern.compile("data-post=\"[^\"/]+/(\\d+)\"");
+    private static final Pattern TEXT = Pattern.compile(
+            "tgme_widget_message_text js-message_text[^>]*>(.*?)</div>", Pattern.DOTALL);
+    private static final Pattern TIME = Pattern.compile("<time datetime=\"([^\"]+)\" class=\"time\"");
+
+    /** Адрес публичной страницы канала; after>0 — только сообщения новее этого номера. */
+    static String channelUrl(String channel, long after) {
+        return "https://t.me/s/" + channel + (after > 0 ? "?after=" + after : "");
+    }
+
+    static Channel parseChannel(String html) {
+        Channel ch = new Channel();
+        String[] blocks = html.split("tgme_widget_message_wrap");
+        for (int i = 1; i < blocks.length; i++) {
+            String b = blocks[i];
+            Matcher p = POST.matcher(b);
+            if (!p.find()) continue;
+            long id = Long.parseLong(p.group(1));
+            ch.lastId = Math.max(ch.lastId, id);
+            Matcher t = TEXT.matcher(b);
+            if (!t.find()) continue;
+            String text = t.group(1).replaceAll("<br\\s*/?>", " ").replaceAll("<[^>]+>", "")
+                    .replace("&#33;", "!").replace("&quot;", "\"").replace("&amp;", "&")
+                    .replaceAll("\\s+", " ").trim();
+            Boolean kind = classify(text);
+            if (kind == null) continue;
+            if (ch.last != null && ch.last.id > id) continue;
+            Post post = new Post();
+            post.id = id;
+            post.alert = kind;
+            post.text = text;
+            Matcher tm = TIME.matcher(b);
+            if (tm.find()) {
+                try {
+                    post.timeMs = ZonedDateTime.parse(tm.group(1)).toInstant().toEpochMilli();
+                } catch (Exception ignored) {
+                }
             }
-            List<ZonedDateTime[]> spans = new ArrayList<>();
-            boolean found = false;
-            for (Long ts : days.keySet()) {
-                JSONObject g = days.get(ts).optJSONObject(key);
-                if (g == null) continue;
-                found = true;
-                ZonedDateTime base = Instant.ofEpochSecond(ts).atZone(KYIV);
-                for (int h = 1; h <= 24; h++) {
-                    String v = g.optString(String.valueOf(h), "yes");
-                    boolean first = v.equals("no") || v.equals("first");
-                    boolean second = v.equals("no") || v.equals("second");
-                    for (int half = 0; half < 2; half++) {
-                        if (!(half == 0 ? first : second)) continue;
-                        ZonedDateTime s = base.plusMinutes((h - 1) * 60L + half * 30L);
-                        ZonedDateTime e = s.plusMinutes(30);
-                        if (!spans.isEmpty() && spans.get(spans.size() - 1)[1].equals(s)) {
-                            spans.get(spans.size() - 1)[1] = e;
-                        } else {
-                            spans.add(new ZonedDateTime[]{s, e});
-                        }
+            ch.last = post;
+        }
+        return ch;
+    }
+
+    /** true — объявлена тревога, false — отбой, null — сообщение о другом. */
+    static Boolean classify(String text) {
+        String s = text.toLowerCase(Locale.ROOT);
+        if (s.contains("відбій") || s.contains("отбой")) return false;
+        if (s.contains("тривог") || s.contains("тревог")) return true;
+        return null;
+    }
+
+    // ----------------------------------------------------------------- свет
+
+    /** Отрезки без света по графику группы, склеенные через полночь. null — группы нет в графике. */
+    static List<ZonedDateTime[]> spans(JSONObject fact, String group) throws Exception {
+        JSONObject data = fact.getJSONObject("data");
+        String key = "GPV" + group;
+        TreeMap<Long, JSONObject> days = new TreeMap<>();
+        for (Iterator<String> it = data.keys(); it.hasNext(); ) {
+            String ts = it.next();
+            days.put(Long.parseLong(ts), data.getJSONObject(ts));
+        }
+        List<ZonedDateTime[]> spans = new ArrayList<>();
+        boolean found = false;
+        for (Long ts : days.keySet()) {
+            JSONObject g = days.get(ts).optJSONObject(key);
+            if (g == null) continue;
+            found = true;
+            ZonedDateTime base = Instant.ofEpochSecond(ts).atZone(KYIV);
+            for (int h = 1; h <= 24; h++) {
+                String v = g.optString(String.valueOf(h), "yes");
+                boolean first = v.equals("no") || v.equals("first");
+                boolean second = v.equals("no") || v.equals("second");
+                for (int half = 0; half < 2; half++) {
+                    if (!(half == 0 ? first : second)) continue;
+                    ZonedDateTime s = base.plusMinutes((h - 1) * 60L + half * 30L);
+                    ZonedDateTime e = s.plusMinutes(30);
+                    if (!spans.isEmpty() && spans.get(spans.size() - 1)[1].equals(s)) {
+                        spans.get(spans.size() - 1)[1] = e;
+                    } else {
+                        spans.add(new ZonedDateTime[]{s, e});
                     }
                 }
             }
-            if (!found) return "💡 Нет графика для группы " + group;
+        }
+        return found ? spans : null;
+    }
 
-            for (ZonedDateTime[] sp : spans) {
-                if (!now.isBefore(sp[1])) continue;
-                if (!now.isBefore(sp[0])) {
-                    return "🔌 Света нет до " + when(sp[1], now);
-                }
-                return "💡 Свет есть · отключение " + when(sp[0], now) + "–" + sp[1].format(HM);
+    /**
+     * График группы по дням начиная с сегодняшнего: {начало дня: значения по часам}.
+     * Нужен, чтобы понять, изменился ли график. null — группы нет в графике.
+     */
+    static JSONObject dayKeys(JSONObject fact, String group, ZonedDateTime now) throws Exception {
+        JSONObject data = fact.getJSONObject("data");
+        long today = now.toLocalDate().atStartOfDay(KYIV).toEpochSecond();
+        JSONObject out = new JSONObject();
+        boolean found = false;
+        for (Iterator<String> it = data.keys(); it.hasNext(); ) {
+            String ts = it.next();
+            JSONObject g = data.getJSONObject(ts).optJSONObject("GPV" + group);
+            if (g == null) continue;
+            found = true;
+            if (Long.parseLong(ts) < today) continue;
+            StringBuilder sb = new StringBuilder();
+            for (int h = 1; h <= 24; h++) sb.append(g.optString(String.valueOf(h), "yes")).append(',');
+            out.put(ts, sb.toString());
+        }
+        return found ? out : null;
+    }
+
+    /** true, если в новом графике есть день, которого не было или который отличается. */
+    static boolean changed(String oldDays, JSONObject newDays) {
+        try {
+            if (oldDays == null) return true;
+            if (newDays == null) return !oldDays.equals("null");
+            if (oldDays.equals("null")) return true;
+            JSONObject old = new JSONObject(oldDays);
+            for (Iterator<String> it = newDays.keys(); it.hasNext(); ) {
+                String k = it.next();
+                if (!newDays.getString(k).equals(old.optString(k, ""))) return true;
             }
-            return "💡 Свет есть · отключений по графику нет";
+            return false;
         } catch (Exception e) {
-            return "💡 График недоступен";
+            return true;
         }
     }
 
-    private static String when(ZonedDateTime t, ZonedDateTime now) {
+    /** Список групп, которые есть в графике, например "1.1, 2.1, …". */
+    static String groups(JSONObject fact) {
+        try {
+            JSONObject data = fact.getJSONObject("data");
+            JSONObject day = data.getJSONObject(data.keys().next());
+            List<String> names = new ArrayList<>();
+            for (Iterator<String> it = day.keys(); it.hasNext(); ) {
+                String k = it.next();
+                if (k.startsWith("GPV")) names.add(k.substring(3));
+            }
+            names.sort((a, b) -> Double.compare(Double.parseDouble(a), Double.parseDouble(b)));
+            return String.join(", ", names);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** Строка о свете на данный момент, например "Свет есть · отключение 13:00–20:00". */
+    static String powerLine(List<ZonedDateTime[]> spans, String group, ZonedDateTime now) {
+        if (spans == null) return "💡 В графике ДТЭК нет группы " + group;
+        for (ZonedDateTime[] sp : spans) {
+            if (!now.isBefore(sp[1])) continue;
+            if (!now.isBefore(sp[0])) return "🔌 Света нет до " + when(sp[1], now);
+            return "💡 Свет есть · отключение " + when(sp[0], now) + "–" + sp[1].format(HM);
+        }
+        return "💡 Свет есть · отключений по графику нет";
+    }
+
+    /** Все отключения с этого момента одной строкой — для уведомления о новом графике. */
+    static String summary(List<ZonedDateTime[]> spans, ZonedDateTime now) {
+        StringBuilder sb = new StringBuilder();
+        for (ZonedDateTime[] sp : spans) {
+            if (!now.isBefore(sp[1])) continue;
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(when(sp[0], now)).append("–").append(sp[1].format(HM));
+        }
+        return sb.length() == 0 ? "Отключений по графику нет" : "Без света: " + sb;
+    }
+
+    static String when(ZonedDateTime t, ZonedDateTime now) {
         String s = t.format(HM);
         return t.toLocalDate().isAfter(now.toLocalDate()) ? "завтра " + s : s;
     }
 
-    static String nowHm() {
-        return ZonedDateTime.now(ZoneId.systemDefault()).format(HM);
+    static String hm(long ms) {
+        return Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).format(HM);
     }
 
     private Data() {

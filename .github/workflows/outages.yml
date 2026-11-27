@@ -14,6 +14,8 @@ permissions:
 
 jobs:
   check:
+    # Запасной бот выключен, пока в Variables не задано BOT_ENABLED=1
+    if: vars.BOT_ENABLED == '1'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

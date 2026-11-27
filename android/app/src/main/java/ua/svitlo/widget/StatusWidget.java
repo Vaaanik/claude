@@ -7,19 +7,15 @@ import android.appwidget.AppWidgetProvider;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.os.SystemClock;
 import android.widget.RemoteViews;
 
-/** Виджет: тревога в области + ближайшее отключение света. Нажатие — обновить. */
+/** Виджет: тревога + ближайшее отключение света. Нажатие открывает приложение. */
 public class StatusWidget extends AppWidgetProvider {
     static final String ACTION_REFRESH = "ua.svitlo.widget.REFRESH";
-    static final String PREFS = "settings";
-    private static final long EVERY_MS = 2 * 60 * 1000;
-
-    static SharedPreferences prefs(Context c) {
-        return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-    }
+    private static final long EVERY_MS = 60 * 1000;
+    /** Если проверка старше этого — данные считаются устаревшими. */
+    private static final long STALE_MS = 90 * 1000;
 
     private static PendingIntent refreshIntent(Context c) {
         Intent i = new Intent(c, StatusWidget.class).setAction(ACTION_REFRESH);
@@ -27,7 +23,7 @@ public class StatusWidget extends AppWidgetProvider {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 
-    /** Обновлять раз в пару минут, пока телефон не спит (будить его не нужно). */
+    /** Запасное обновление раз в минуту — на случай, если система остановила сервис. */
     static void schedule(Context c) {
         AlarmManager am = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
         am.setInexactRepeating(AlarmManager.ELAPSED_REALTIME,
@@ -47,63 +43,65 @@ public class StatusWidget extends AppWidgetProvider {
     @Override
     public void onUpdate(Context c, AppWidgetManager m, int[] ids) {
         schedule(c);
-        refresh(c, true);
+        refresh(c);
     }
 
     @Override
     public void onReceive(Context c, Intent intent) {
         if (ACTION_REFRESH.equals(intent.getAction())) {
-            refresh(c, true);
+            refresh(c);
         } else {
             super.onReceive(c, intent);
         }
     }
 
-    /** Загружает данные в фоне и перерисовывает все виджеты. */
-    void refresh(final Context c, boolean async) {
-        final PendingResult pending = async ? goAsync() : null;
+    private void refresh(Context c) {
+        final PendingResult pending = goAsync();
         final Context app = c.getApplicationContext();
         new Thread(() -> {
             try {
-                update(app);
+                // Сервис сам всё проверяет; без него проверяем канал прямо здесь.
+                if (!MonitorService.running) MonitorService.checkAlert(app, false);
+                render(app);
             } finally {
-                if (pending != null) pending.finish();
+                pending.finish();
             }
         }).start();
     }
 
-    static void update(Context c) {
+    /** Перерисовывает все виджеты по последнему известному состоянию. */
+    static void render(Context c) {
         AppWidgetManager m = AppWidgetManager.getInstance(c);
         int[] ids = m.getAppWidgetIds(new ComponentName(c, StatusWidget.class));
         if (ids.length == 0) return;
 
-        SharedPreferences p = prefs(c);
-        String region = p.getString("region", Data.REGIONS[0]);
-        String group = p.getString("group", "4.2");
-
-        Data.Alert a = Data.alert(region);
-        String power = Data.power(group);
+        int alert = Store.alert(c);
+        long checked = Store.alertChecked(c);
+        boolean stale = System.currentTimeMillis() - checked > STALE_MS;
 
         RemoteViews v = new RemoteViews(c.getPackageName(), R.layout.widget);
-        if (a.active == null) {
-            // Сеть недоступна: оставляем прошлый статус, но честно помечаем.
-            v.setTextViewText(R.id.updated, "нет связи · " + Data.nowHm() + " · нажмите, чтобы обновить");
-            v.setOnClickPendingIntent(R.id.root, refreshIntent(c));
-            m.partiallyUpdateAppWidget(ids, v);
-            return;
-        }
-        if (a.active) {
+        if (alert == -1 || stale) {
+            // Не показываем «тревоги нет», если не уверены, что это так сейчас.
+            v.setInt(R.id.root, "setBackgroundResource", R.drawable.bg_unknown);
+            v.setTextViewText(R.id.alert_title, alert == 1 ? "🚨 ТРЕВОГА (?)" : "Нет связи");
+            v.setTextViewText(R.id.alert_sub, checked == 0 ? "данные ещё не получены"
+                    : "последняя проверка в " + Data.hm(checked) + " · нажмите");
+        } else if (alert == 1) {
             v.setInt(R.id.root, "setBackgroundResource", R.drawable.bg_alert);
             v.setTextViewText(R.id.alert_title, "🚨 ТРЕВОГА");
-            v.setTextViewText(R.id.alert_sub, region + (a.since.isEmpty() ? "" : " · с " + a.since));
+            v.setTextViewText(R.id.alert_sub, "Кривой Рог · с " + Data.hm(Store.alertSince(c)));
         } else {
             v.setInt(R.id.root, "setBackgroundResource", R.drawable.bg_clear);
             v.setTextViewText(R.id.alert_title, "✅ Тревоги нет");
-            v.setTextViewText(R.id.alert_sub, region);
+            v.setTextViewText(R.id.alert_sub, "Кривой Рог · отбой в " + Data.hm(Store.alertSince(c)));
         }
-        v.setTextViewText(R.id.power, power);
-        v.setTextViewText(R.id.updated, "обновлено " + Data.nowHm());
-        v.setOnClickPendingIntent(R.id.root, refreshIntent(c));
+        v.setTextViewText(R.id.power, Store.powerLine(c));
+        long fetched = Store.factFetched(c);
+        v.setTextViewText(R.id.updated, "тревога: " + (checked == 0 ? "—" : Data.hm(checked))
+                + " · график ДТЭК: " + (fetched == 0 ? "—" : Data.hm(fetched)));
+        v.setOnClickPendingIntent(R.id.root, PendingIntent.getActivity(c, 1,
+                new Intent(c, MainActivity.class),
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
         m.updateAppWidget(ids, v);
     }
 }
