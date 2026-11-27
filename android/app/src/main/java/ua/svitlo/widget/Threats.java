@@ -14,7 +14,7 @@ final class Threats {
      * Каналы по умолчанию (через запятую). Звёздочка после имени — местный канал:
      * в нём всё про наш город, поэтому название города в сообщении не требуется.
      */
-    static final String DEFAULT_CHANNELS = "kpszsu, vilkul*";
+    static final String DEFAULT_CHANNELS = "kpszsu, vilkul*, IMS_KR_TM*, oborona_kr*";
 
     /** Основы слов, по которым сообщение считается относящимся к городу. */
     static final String DEFAULT_CITY = "кривий ріг, кривого рогу, кривому розі, кривим рогом, "
@@ -34,13 +34,22 @@ final class Threats {
 
     /** Слова, по которым короткий пост местного канала считается предупреждением. */
     private static final String[] LOCAL = {"атак", "удар", "вибух", "бпла", "шахед", "мопед",
-            "ракет", "баліст", "бандерол", "у повітрі", "загроз", "відбій", "чисто", "курс",
+            "реактив", "ракет", "баліст", "бандерол", "у повітрі", "загроз", "чисто", "курс",
+            "уважно", "увага", "пішов", "попер", "вилетів", "розворот", "доворот", "відвернув",
+            "світлішаємо", "червоніємо", "з півн", "з півд", "зі сход", "із заход", "з заход",
+            "на схід", "на захід", "на північ", "на південь", "🛵", "🏍", "🚀",
             "тернівськ", "покровськ", "саксаганськ", "довгинцівськ", "металургійн",
-            "центрально", "інгулец", "північ міста", "південь міста"};
+            "центрально", "інгулец", "рокуват", "даманськ", "гзк", "нікопольщин",
+            "нікопольськ", "херсонщин", "миколаївщин", "кіровоградщин"};
 
-    /** Подписи-хвосты местных каналов, которые не несут смысла. */
-    private static final String[] FOOTER = {"підписатись", "підписатися", "написати нам",
-            "скинути фото", "повідомити"};
+    /** Реклама, сборы, розыгрыши и дубли сирены в местных каналах. */
+    private static final String[] LOCAL_NOISE = {"розіграш", "переможц", "підтрим", "реклам",
+            "pinned", "графік", "whatsapp", "брелок", "повітряна тривога", "повітряної тривоги",
+            "🔠"};
+
+    /** С этих слов начинается хвост-подпись, его отрезаем. */
+    private static final String[] FOOTER = {"✉️", "підписатись", "підписатися", "написати нам",
+            "скинути фото", "повідомити", "📞"};
     private static final int LOCAL_MAX_LEN = 300;
 
     private static final String OBLAST = "дніпропетровщ";
@@ -50,6 +59,7 @@ final class Threats {
         long id;         // номер сообщения
         long timeMs;
         boolean city;    // упомянут сам город (иначе — район/подступы)
+        boolean local;   // из местного канала
         String type;     // "🛵 БпЛА", "🚀 Ракета" …
         String text;     // суть: только фразы про наши места
 
@@ -78,16 +88,18 @@ final class Threats {
     static String type(String text) {
         String s = norm(text);
         if (s.contains("відбій")) return "✅ Отбой";
+        if (s.contains("чисто") || s.contains("без загроз")) return "✅ Чисто";
         if (s.contains("балісти") || s.contains("швидкісн")) return "🚀 Баллистика";
         if (s.contains("ракет") || s.contains("крилат") || s.contains("бандерол")) return "🚀 Ракета";
         if (KAB.matcher(s).find() || s.contains("авіаційних бомб") || s.contains("авіабомб")
                 || s.contains("засобів ураження")) return "💣 КАБ";
-        if (s.contains("реактивн")) return "🏍 Реактивный БпЛА";
+        if (s.contains("реактив")) return "🏍 Реактивный БпЛА";
         if (s.contains("бпла") || s.contains("шахед") || s.contains("shahed") || s.contains("ударн")
-                || s.contains("дрон") || s.contains("мопед") || s.contains("безпілотник")) return "🛵 БпЛА";
+                || s.contains("дрон") || s.contains("мопед") || s.contains("безпілотник")
+                || s.contains("🛵")) return "🛵 БпЛА";
         if (s.contains("тактичної авіації") || s.contains("міг-31")) return "✈️ Авиация";
         if (s.contains("вибух")) return "💥 Взрывы";
-        return "⚠️ Угроза";
+        return "⚠️ Обстановка";
     }
 
     /** Сводки, статистика и благодарности — не оперативные предупреждения. */
@@ -116,7 +128,7 @@ final class Threats {
      */
     static Item extract(String source, boolean local, Data.Raw post, String[] city, String[] area,
             int maxLen) {
-        if (local) return extractLocal(source, post);
+        if (local) return extractLocal(source, post, city, area);
         String text = post.text;
         if (text == null || text.isEmpty() || text.length() > maxLen || noise(text)) return null;
         String all = norm(text);
@@ -161,24 +173,34 @@ final class Threats {
         return it;
     }
 
-    /** Местный канал: берём короткие посты об атаке целиком, без хвостов-подписей. */
-    private static Item extractLocal(String source, Data.Raw post) {
+    /**
+     * Местный канал: берём короткие посты об угрозе целиком, без хвостов-подписей,
+     * номеров карт и рекламы.
+     */
+    private static Item extractLocal(String source, Data.Raw post, String[] city, String[] area) {
         if (post.text == null || post.text.isEmpty() || noise(post.text)) return null;
-        StringBuilder sb = new StringBuilder();
-        for (String line : post.text.split("\\n+")) {
-            String n = norm(line);
-            if (n.trim().isEmpty() || hasAny(n, FOOTER, false)) continue;
-            if (sb.length() > 0) sb.append(' ');
-            sb.append(line.trim());
+        String text = post.text;
+        String low = norm(text);
+        if (hasAny(low, LOCAL_NOISE, false)) return null;
+        int cut = text.length();
+        for (String f : FOOTER) {
+            int i = low.indexOf(f);
+            // norm() не меняет длину строки, поэтому индексы совпадают
+            if (i >= 0 && i < cut) cut = i;
         }
-        String essence = clean(sb.toString());
-        if (essence.isEmpty() || essence.length() > LOCAL_MAX_LEN) return null;
-        if (!hasAny(norm(essence), LOCAL, false)) return null;
+        String essence = text.substring(0, cut)
+                .replaceAll("\\d{16}", " ").replace("🏦", " ")
+                .replaceAll("\\s*\\n+\\s*", ". ").replaceAll("\\s+", " ").trim();
+        essence = essence.replaceFirst("^[.\\s]+", "").replaceFirst("[.\\s]+$", "");
+        if (essence.length() < 4 || essence.length() > LOCAL_MAX_LEN) return null;
+        String n = norm(essence);
+        if (!hasAny(n, LOCAL, false) && !hasAny(n, city, true) && !hasAny(n, area, true)) return null;
         Item it = new Item();
         it.source = source;
         it.id = post.id;
         it.timeMs = post.timeMs;
         it.city = true;
+        it.local = true;
         it.type = type(essence);
         it.text = essence;
         return it;

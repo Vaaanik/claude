@@ -45,6 +45,7 @@ public class MonitorService extends Service {
     private static final String CH_ALERT = "alert";
     private static final String CH_POWER = "power";
     private static final String CH_THREAT = "threat";
+    private static final String CH_LOCAL = "local";
     private static final int ID_SERVICE = 1, ID_ALERT = 2, ID_POWER = 3, ID_REMIND = 4, ID_THREAT = 100;
 
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -67,6 +68,7 @@ public class MonitorService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        Store.migrate(this);
         NotificationManager nm = getSystemService(NotificationManager.class);
         nm.createNotificationChannel(new NotificationChannel(CH_SERVICE, "Работа в фоне",
                 NotificationManager.IMPORTANCE_LOW));
@@ -74,6 +76,8 @@ public class MonitorService extends Service {
                 NotificationManager.IMPORTANCE_HIGH));
         nm.createNotificationChannel(new NotificationChannel(CH_THREAT, "Угрозы: ракеты и БпЛА",
                 NotificationManager.IMPORTANCE_HIGH));
+        nm.createNotificationChannel(new NotificationChannel(CH_LOCAL, "Местные каналы: обстановка",
+                NotificationManager.IMPORTANCE_DEFAULT));
         nm.createNotificationChannel(new NotificationChannel(CH_POWER, "Отключения света",
                 NotificationManager.IMPORTANCE_DEFAULT));
     }
@@ -206,9 +210,9 @@ public class MonitorService extends Service {
     }
 
     private void notifyThreat(Threats.Item it) {
-        Notification n = new Notification.Builder(this, CH_THREAT)
+        Notification n = new Notification.Builder(this, it.local ? CH_LOCAL : CH_THREAT)
                 .setSmallIcon(android.R.drawable.stat_sys_warning)
-                .setContentTitle(it.type + (it.city ? " · Кривой Рог" : " · рядом"))
+                .setContentTitle(it.type + (it.city ? " · Кривой Рог" : " · рядом") + " · " + it.source)
                 .setContentText(it.text)
                 .setStyle(new Notification.BigTextStyle().bigText(it.text + "\n— " + it.source))
                 .setWhen(it.timeMs > 0 ? it.timeMs : System.currentTimeMillis())
@@ -216,8 +220,9 @@ public class MonitorService extends Service {
                 .setContentIntent(open(this))
                 .setAutoCancel(true)
                 .build();
-        // отдельное уведомление на каждое сообщение, чтобы новое не затирало старое
-        getSystemService(NotificationManager.class).notify(ID_THREAT + (int) (it.id % 1000), n);
+        // одно уведомление на канал: новое сообщение заменяет предыдущее из того же канала
+        getSystemService(NotificationManager.class)
+                .notify(ID_THREAT + Math.floorMod(it.source.hashCode(), 1000), n);
     }
 
     private void publish() {

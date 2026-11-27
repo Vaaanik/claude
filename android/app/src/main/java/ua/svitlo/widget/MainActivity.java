@@ -32,6 +32,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        Store.migrate(this);
         final SharedPreferences p = Store.p(this);
         int pad = (int) (20 * getResources().getDisplayMetrics().density);
 

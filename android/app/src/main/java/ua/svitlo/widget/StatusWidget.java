@@ -100,13 +100,13 @@ public class StatusWidget extends AppWidgetProvider {
             v.setTextViewText(R.id.alert_title, "✅ Тревоги нет");
             v.setTextViewText(R.id.alert_sub, "Кривой Рог · отбой в " + Data.hm(Store.alertSince(c)));
         }
-        // Угрозы за последние 30 минут: две самые свежие
+        // Угрозы за последние 30 минут: три самые свежие
         List<Threats.Item> th = Store.threats(c, THREAT_SHOW_MS);
         if (th.isEmpty()) {
             v.setViewVisibility(R.id.threats, View.GONE);
         } else {
             StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < th.size() && i < 2; i++) {
+            for (int i = 0; i < th.size() && i < 3; i++) {
                 if (i > 0) sb.append('\n');
                 sb.append(Store.line(th.get(i)));
             }

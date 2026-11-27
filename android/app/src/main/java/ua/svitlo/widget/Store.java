@@ -76,6 +76,24 @@ final class Store {
         }
     }
 
+    /** Разовое добавление новых каналов по умолчанию к уже сохранённому списку. */
+    static void migrate(Context c) {
+        SharedPreferences sp = p(c);
+        if (sp.getInt("defaultsVersion", 0) >= 4) return;
+        SharedPreferences.Editor e = sp.edit().putInt("defaultsVersion", 4);
+        String saved = sp.getString("threatChannels", null);
+        if (saved != null) {
+            StringBuilder sb = new StringBuilder(saved.trim());
+            for (String d : Threats.DEFAULT_CHANNELS.split(",\\s*")) {
+                if (!saved.toLowerCase().contains(d.replace("*", "").toLowerCase())) {
+                    sb.append(sb.length() > 0 ? ", " : "").append(d);
+                }
+            }
+            e.putString("threatChannels", sb.toString());
+        }
+        e.apply();
+    }
+
     // --- угрозы
     static String threatChannels(Context c) {
         return p(c).getString("threatChannels", Threats.DEFAULT_CHANNELS);
