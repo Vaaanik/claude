@@ -5,7 +5,7 @@
 Запускается по расписанию из GitHub Actions. Только стандартная библиотека.
 
 Настройки (переменные окружения):
-  GROUP               группа/очередь, например 4.2
+  GROUP               группа/очередь, например 8.1
   TELEGRAM_BOT_TOKEN  токен бота от @BotFather
   TELEGRAM_CHAT_ID    (необязательно) id чата; если не задан, берётся
                       из последнего сообщения, которое вы написали боту
@@ -37,7 +37,7 @@ SCHEDULE_URL = os.environ.get(
 )
 ALERTS_URL = os.environ.get("ALERTS_URL", "https://ubilling.net.ua/aerialalerts/")
 
-GROUP = os.environ.get("GROUP", "4.2").strip()
+GROUP = os.environ.get("GROUP", "8.1").strip()
 REMIND_MINUTES = int(os.environ.get("REMIND_MINUTES") or 30)
 # Запуски по расписанию приходят неровно, поэтому окно напоминания шире.
 REMIND_SLACK = 7

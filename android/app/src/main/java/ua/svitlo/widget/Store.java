@@ -22,7 +22,7 @@ final class Store {
     }
 
     static String group(Context c) {
-        return p(c).getString("group", "4.2");
+        return p(c).getString("group", "8.1");
     }
 
     static int remindMinutes(Context c) {
@@ -79,8 +79,10 @@ final class Store {
     /** Разовое добавление новых каналов по умолчанию к уже сохранённому списку. */
     static void migrate(Context c) {
         SharedPreferences sp = p(c);
-        if (sp.getInt("defaultsVersion", 0) >= 4) return;
-        SharedPreferences.Editor e = sp.edit().putInt("defaultsVersion", 4);
+        if (sp.getInt("defaultsVersion", 0) >= 5) return;
+        SharedPreferences.Editor e = sp.edit().putInt("defaultsVersion", 5);
+        // прежняя группа по умолчанию была 4.2 — заменяем на 8.1
+        if ("4.2".equals(sp.getString("group", null))) e.putString("group", "8.1");
         String saved = sp.getString("threatChannels", null);
         if (saved != null) {
             StringBuilder sb = new StringBuilder(saved.trim());

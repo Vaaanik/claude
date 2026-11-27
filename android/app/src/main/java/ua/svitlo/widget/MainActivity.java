@@ -70,7 +70,7 @@ public class MainActivity extends Activity {
         areaW.setText(Store.areaWords(this));
         box.addView(areaW);
 
-        box.addView(label("\nГруппа (очередь) отключений ДТЭК, например 4.1"));
+        box.addView(label("\nГруппа (очередь) отключений ДТЭК, например 8.1"));
         final EditText group = new EditText(this);
         group.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
         group.setText(Store.group(this));

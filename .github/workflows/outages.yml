@@ -30,7 +30,7 @@ jobs:
 
       - name: Проверить график
         env:
-          GROUP: ${{ vars.GROUP || '4.2' }}
+          GROUP: ${{ vars.GROUP || '8.1' }}
           REMIND_MINUTES: ${{ vars.REMIND_MINUTES || '30' }}
           ALERTS: ${{ vars.ALERTS || '0' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
