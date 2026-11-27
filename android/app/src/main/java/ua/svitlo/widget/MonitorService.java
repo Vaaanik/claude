@@ -37,7 +37,7 @@ public class MonitorService extends Service {
     /** При первом чтении канала показываем только свежее, без уведомлений. */
     private static final long THREAT_BACKLOG_MS = 30 * 60_000;
     /** Длинные посты — сводки и новости, а не оперативные предупреждения. */
-    private static final int THREAT_MAX_LEN = 600;
+    private static final int THREAT_MAX_LEN = 400;
     private static final long DTEK_EVERY_MS = 5 * 60_000;
     private static final long DTEK_RETRY_MS = 60_000;
 
@@ -167,7 +167,9 @@ public class MonitorService extends Service {
     }
 
     /** Читает новые сообщения канала; true, если появились сообщения про наши места. */
-    private boolean checkThreats(String channel) {
+    private boolean checkThreats(String entry) {
+        boolean local = entry.endsWith("*");
+        String channel = entry.replace("*", "");
         SharedPreferences p = Store.p(this);
         String key = "last_" + channel;
         long lastId = p.getLong(key, 0);
@@ -193,7 +195,7 @@ public class MonitorService extends Service {
             max = Math.max(max, r.id);
             if (r.id <= lastId) continue;
             if (lastId == 0 && now - r.timeMs > THREAT_BACKLOG_MS) continue;
-            Threats.Item it = Threats.extract(channel, r, city, area, THREAT_MAX_LEN);
+            Threats.Item it = Threats.extract(channel, local, r, city, area, THREAT_MAX_LEN);
             if (it != null) found.add(it);
         }
         ed.putLong(key, max).apply();

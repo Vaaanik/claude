@@ -74,6 +74,18 @@ final class Data {
         long id;
         long timeMs;
         String text = "";   // переносы строк сохранены
+        String reply = "";  // начало сообщения, на которое это отвечает
+    }
+
+    private static final Pattern REPLY = Pattern.compile(
+            "js-message_reply_text[^>]*>(.*?)</div>", Pattern.DOTALL);
+
+    private static String plain(String html) {
+        return html.replaceAll("<br\\s*/?>", "\n").replaceAll("<[^>]+>", "")
+                .replace("&#33;", "!").replace("&#39;", "'").replace("&#036;", "$")
+                .replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&nbsp;", " ").replace("&amp;", "&")
+                .replaceAll("[ \\t]+", " ").trim();
     }
 
     /** Все сообщения со страницы канала, от старых к новым. */
@@ -88,12 +100,10 @@ final class Data {
             r.id = Long.parseLong(p.group(1));
             Matcher t = TEXT.matcher(b);
             if (t.find()) {
-                r.text = t.group(1).replaceAll("<br\\s*/?>", "\n").replaceAll("<[^>]+>", "")
-                        .replace("&#33;", "!").replace("&#39;", "'").replace("&#036;", "$")
-                        .replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">")
-                        .replace("&nbsp;", " ").replace("&amp;", "&")
-                        .replaceAll("[ \\t]+", " ").trim();
+                r.text = plain(t.group(1));
             }
+            Matcher rp = REPLY.matcher(b);
+            if (rp.find()) r.reply = plain(rp.group(1));
             Matcher tm = TIME.matcher(b);
             if (tm.find()) {
                 try {

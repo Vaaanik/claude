@@ -85,7 +85,7 @@ final class Store {
         List<String> out = new ArrayList<>();
         for (String s : threatChannels(c).split("[,\\s]+")) {
             s = cleanChannel(s);
-            if (!s.isEmpty() && !out.contains(s)) out.add(s);
+            if (!s.replace("*", "").isEmpty() && !out.contains(s)) out.add(s);
         }
         return out;
     }

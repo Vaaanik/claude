@@ -50,7 +50,7 @@ public class MainActivity extends Activity {
         channel.setText(Store.channel(this));
         box.addView(channel);
 
-        box.addView(label("\nКаналы об угрозах — ракеты, БпЛА (через запятую)"));
+        box.addView(label("\nКаналы об угрозах — ракеты, БпЛА (через запятую; * после имени — местный канал, где всё про ваш город)"));
         final EditText threatCh = new EditText(this);
         threatCh.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
@@ -185,6 +185,7 @@ public class MainActivity extends Activity {
         if (th.isEmpty()) s.append(" сообщений про ваш город и район не было");
         for (int i = 0; i < th.size() && i < 8; i++) s.append("\n• ").append(Store.line(th.get(i)));
         for (String c : Store.threatChannelList(this)) {
+            c = c.replace("*", "");
             long ok = Store.p(this).getLong("ok_" + c, 0);
             s.append("\n").append(c).append(": ").append(ok == 0 ? "ещё не читался"
                     : "проверен " + (System.currentTimeMillis() - ok) / 1000 + " с назад");
