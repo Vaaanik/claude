@@ -113,7 +113,8 @@ public class StatusWidget extends AppWidgetProvider {
             v.setTextViewText(R.id.threats, sb.toString());
             v.setViewVisibility(R.id.threats, View.VISIBLE);
         }
-        v.setTextViewText(R.id.power, Store.powerLine(c));
+        String today = Store.todayLine(c);
+        v.setTextViewText(R.id.power, Store.powerLine(c) + (today.isEmpty() ? "" : "\n" + today));
         long fetched = Store.factFetched(c);
         v.setTextViewText(R.id.updated, "тревога: " + (checked == 0 ? "—" : Data.hm(checked))
                 + " · график ДТЭК: " + (fetched == 0 ? "—" : Data.hm(fetched)));

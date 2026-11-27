@@ -57,6 +57,8 @@ final class Data {
     static final class Channel {
         long lastId;      // самый свежий номер сообщения на странице (0 — постов нет)
         Post last;        // последнее сообщение о тревоге/отбое, если есть
+        long lastAlertMs; // время последнего объявления тревоги на странице (0 — нет)
+        long lastClearMs; // время последнего отбоя на странице (0 — нет)
     }
 
     private static final Pattern POST = Pattern.compile("data-post=\"[^\"/]+/(\\d+)\"");
@@ -129,6 +131,8 @@ final class Data {
             post.text = r.text.replaceAll("\\s+", " ").trim();
             post.timeMs = r.timeMs;
             ch.last = post;
+            if (kind) ch.lastAlertMs = r.timeMs;
+            else ch.lastClearMs = r.timeMs;
         }
         return ch;
     }
@@ -215,6 +219,62 @@ final class Data {
         } catch (Exception e) {
             return true;
         }
+    }
+
+    /**
+     * График группы на один день по получасам: 48 символов,
+     * X — света нет, ? — возможно отключение, . — свет есть. null — данных на день нет.
+     */
+    static String halves(JSONObject fact, String group, java.time.LocalDate day) {
+        try {
+            long ts = day.atStartOfDay(KYIV).toEpochSecond();
+            JSONObject d = fact.getJSONObject("data").optJSONObject(String.valueOf(ts));
+            if (d == null) return null;
+            JSONObject g = d.optJSONObject("GPV" + group);
+            if (g == null) return null;
+            StringBuilder sb = new StringBuilder();
+            for (int h = 1; h <= 24; h++) {
+                switch (g.optString(String.valueOf(h), "yes")) {
+                    case "no": sb.append("XX"); break;
+                    case "first": sb.append("X."); break;
+                    case "second": sb.append(".X"); break;
+                    case "maybe": sb.append("??"); break;
+                    case "mfirst": sb.append("?."); break;
+                    case "msecond": sb.append(".?"); break;
+                    default: sb.append("..");
+                }
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Отрезки с данным знаком одной строкой: "10:00–13:30, 19:00–22:30". */
+    static String intervals(String halves, char mark) {
+        StringBuilder sb = new StringBuilder();
+        int start = -1;
+        for (int i = 0; i <= halves.length(); i++) {
+            boolean on = i < halves.length() && halves.charAt(i) == mark;
+            if (on && start < 0) start = i;
+            if (!on && start >= 0) {
+                if (sb.length() > 0) sb.append(", ");
+                sb.append(half(start)).append("–").append(half(i));
+                start = -1;
+            }
+        }
+        return sb.toString();
+    }
+
+    /** Сколько часов в сутках с данным знаком. */
+    static double hours(String halves, char mark) {
+        int n = 0;
+        for (int i = 0; i < halves.length(); i++) if (halves.charAt(i) == mark) n++;
+        return n / 2.0;
+    }
+
+    private static String half(int i) {
+        return String.format(Locale.ROOT, "%02d:%02d", i / 2, 30 * (i % 2));
     }
 
     /** Список групп, которые есть в графике, например "1.1, 2.1, …". */

@@ -43,6 +43,26 @@ final class Store {
         return p(c).getLong("alertChecked", 0);
     }
 
+    /** Начало последней тревоги (0 — неизвестно). */
+    static long alertStart(Context c) {
+        return p(c).getLong("alertStart", 0);
+    }
+
+    /** Отбой последней тревоги (0 — тревога ещё идёт или неизвестно). */
+    static long alertEnd(Context c) {
+        return p(c).getLong("alertEnd", 0);
+    }
+
+    /** Отключения на сегодня одной строкой для виджета; "" — если данных нет. */
+    static String todayLine(Context c) {
+        JSONObject fact = fact(c);
+        if (fact == null) return "";
+        String h = Data.halves(fact, group(c), java.time.LocalDate.now(Data.KYIV));
+        if (h == null) return "";
+        String off = Data.intervals(h, 'X');
+        return off.isEmpty() ? "Сегодня без отключений" : "Сегодня нет света: " + off;
+    }
+
     static long lastPostId(Context c) {
         return p(c).getLong("lastPostId", 0);
     }
@@ -148,9 +168,9 @@ final class Store {
         return out;
     }
 
-    /** Добавляет новые сообщения и выбрасывает старше 6 часов. */
+    /** Добавляет новые сообщения и выбрасывает старше 12 часов. */
     static synchronized void addThreats(Context c, List<Threats.Item> items) {
-        List<Threats.Item> all = threats(c, 6 * 3600_000L);
+        List<Threats.Item> all = threats(c, 12 * 3600_000L);
         for (Threats.Item it : items) {
             boolean dup = false;
             for (Threats.Item old : all) if (old.key().equals(it.key())) dup = true;
@@ -159,7 +179,7 @@ final class Store {
         all.sort((a, b) -> Long.compare(b.timeMs, a.timeMs));
         JSONArray arr = new JSONArray();
         try {
-            for (int i = 0; i < all.size() && i < 40; i++) {
+            for (int i = 0; i < all.size() && i < 400; i++) {
                 Threats.Item it = all.get(i);
                 arr.put(new JSONObject().put("s", it.source).put("i", it.id).put("t", it.timeMs)
                         .put("c", it.city).put("y", it.type).put("x", it.text));

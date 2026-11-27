@@ -34,8 +34,8 @@ public class MonitorService extends Service {
 
     private static final long ALERT_EVERY_MS = 10_000;
     private static final long THREAT_EVERY_MS = 15_000;
-    /** При первом чтении канала показываем только свежее, без уведомлений. */
-    private static final long THREAT_BACKLOG_MS = 30 * 60_000;
+    /** При первом чтении канала берём последние часы — без уведомлений, для истории. */
+    private static final long THREAT_BACKLOG_MS = 3 * 3600_000;
     /** Длинные посты — сводки и новости, а не оперативные предупреждения. */
     private static final int THREAT_MAX_LEN = 400;
     private static final long DTEK_EVERY_MS = 5 * 60_000;
@@ -257,6 +257,13 @@ public class MonitorService extends Service {
             SharedPreferences.Editor e = p.edit().putLong("alertChecked", System.currentTimeMillis());
             if (ch.lastId > lastId) e.putLong("lastPostId", ch.lastId);
             boolean changed = false;
+            // границы последней тревоги — для истории «что летело за эту тревогу»
+            long start = ch.lastAlertMs > 0 ? ch.lastAlertMs : p.getLong("alertStart", 0);
+            if (ch.lastAlertMs > 0) e.putLong("alertStart", start);
+            if (ch.last != null) {
+                if (ch.last.alert) e.putLong("alertEnd", 0);
+                else if (ch.lastClearMs >= start) e.putLong("alertEnd", ch.lastClearMs);
+            }
             if (ch.last != null) {
                 int state = ch.last.alert ? 1 : 0;
                 changed = state != before;
