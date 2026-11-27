@@ -1,0 +1,43 @@
+name: Отключения света
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: outages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Состояние с прошлого запуска
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: outage-state-${{ github.run_id }}
+          restore-keys: outage-state-
+
+      - name: Проверить график
+        env:
+          GROUP: ${{ vars.GROUP || '4.2' }}
+          REMIND_MINUTES: ${{ vars.REMIND_MINUTES || '30' }}
+          ALERTS: ${{ vars.ALERTS || '0' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 bot/check.py
+
+      - name: Сохранить состояние
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: outage-state-${{ github.run_id }}

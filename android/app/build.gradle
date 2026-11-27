@@ -1,0 +1,45 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "ua.svitlo.widget"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "ua.svitlo.widget"
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName "1.0"
+    }
+
+    signingConfigs {
+        // Постоянный ключ, чтобы обновления ставились поверх старой версии.
+        shared {
+            storeFile file("../widget.keystore")
+            storePassword "android"
+            keyAlias "widget"
+            keyPassword "android"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.shared
+        }
+        debug {
+            signingConfig signingConfigs.shared
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+    }
+}

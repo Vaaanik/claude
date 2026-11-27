@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Тревога и свет</string>
+    <string name="widget_desc">Воздушная тревога и отключения света</string>
+</resources>
