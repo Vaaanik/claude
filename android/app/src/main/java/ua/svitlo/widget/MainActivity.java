@@ -48,7 +48,7 @@ public class MainActivity extends Activity {
     private TextView powerNow, todayText, tomorrowLabel, tomorrowText, powerMeta;
     private DayBar todayBar, tomorrowBar;
     private TextView sources;
-    private Button battery;
+    private Button battery, updButton;
     private LinearLayout settings;
 
     @Override
@@ -149,6 +149,17 @@ public class MainActivity extends Activity {
 
         Button save = button(settings, "Сохранить и обновить", BLUE);
         battery = button(settings, "Разрешить работу в фоне без ограничений", GREY);
+        Button upd = button(settings, "Разрешить автообновление", GREY);
+        upd.setOnClickListener(v -> {
+            if (getPackageManager().canRequestPackageInstalls()) {
+                new Thread(() -> Updater.maybeCheck(getApplicationContext(), true)).start();
+                upd.setText("Проверяю обновление…");
+            } else {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + getPackageName())));
+            }
+        });
+        updButton = upd;
         text(settings, "\nВиджет: долгое нажатие на пустом месте главного экрана → Виджеты → "
                 + "«Тревога и свет».\n\nЧтобы система не останавливала слежение, разрешите работу "
                 + "в фоне и не смахивайте постоянное уведомление приложения.", 13, DIM, false);
@@ -230,6 +241,10 @@ public class MainActivity extends Activity {
 
         boolean exempt = getSystemService(PowerManager.class)
                 .isIgnoringBatteryOptimizations(getPackageName());
+        if (!updButton.getText().toString().startsWith("Проверяю")) {
+            updButton.setText(getPackageManager().canRequestPackageInstalls()
+                    ? "Автообновление включено ✓ · проверить сейчас" : "Разрешить автообновление");
+        }
         battery.setEnabled(!exempt);
         battery.setText(exempt ? "Работа в фоне разрешена ✓"
                 : "Разрешить работу в фоне без ограничений");
@@ -420,6 +435,10 @@ public class MainActivity extends Activity {
         long f = Store.factFetched(this);
         s.append("\nСайт ДТЭК: ").append(f == 0 ? "ещё не загружен" : "в " + Data.hm(f));
         if (!MonitorService.running) s.append("\n⚠️ Слежение не запущено");
+        s.append("\n\n").append(Updater.statusLine(this));
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            s.append("\n⚠️ Автообновление выключено: нажмите «Разрешить автообновление» в настройках");
+        }
         sources.setText(s);
     }
 

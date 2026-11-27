@@ -10,8 +10,10 @@ android {
         applicationId "ua.svitlo.widget"
         minSdk 26
         targetSdk 35
-        versionCode 7
-        versionName "6.0"
+        // В CI номер сборки задаётся автоматически (-PbuildNumber=...), чтобы каждая
+        // новая сборка была «новее» установленной и ставилась автообновлением.
+        versionCode((project.findProperty("buildNumber") ?: "7") as int)
+        versionName "7." + (project.findProperty("buildNumber") ?: "0")
     }
 
     signingConfigs {

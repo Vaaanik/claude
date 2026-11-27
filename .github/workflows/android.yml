@@ -28,21 +28,28 @@ jobs:
       - name: Собрать APK
         working-directory: android
         run: |
-          gradle --no-daemon assembleRelease
+          # номер сборки растёт с каждым запуском — по нему приложение понимает, что вышло обновление
+          BUILD=$((1000 + GITHUB_RUN_NUMBER))
+          gradle --no-daemon assembleRelease -PbuildNumber=$BUILD
           cp app/build/outputs/apk/release/app-release.apk ../svitlo-widget.apk
+          echo "{\"versionCode\": $BUILD, \"versionName\": \"7.$BUILD\", \"commit\": \"$GITHUB_SHA\"}" > ../version.json
+          cat ../version.json
 
       - uses: actions/upload-artifact@v4
         with:
           name: svitlo-widget
           path: svitlo-widget.apk
 
-      # На основной ветке выкладываем APK в релиз, чтобы скачать с телефона.
+      # Выкладываем APK в релиз: отсюда приложение само берёт обновления.
       - name: Опубликовать релиз
-        if: github.ref_name == github.event.repository.default_branch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete widget --yes --cleanup-tag || true
-          gh release create widget svitlo-widget.apk \
-            --title "Виджет «Тревога и свет»" \
-            --notes "Скачайте svitlo-widget.apk на телефон и установите."
+          if gh release view widget >/dev/null 2>&1; then
+            gh release upload widget svitlo-widget.apk version.json --clobber
+          else
+            gh release create widget svitlo-widget.apk version.json \
+              --target "$GITHUB_SHA" \
+              --title "Тревога и свет — последняя сборка" \
+              --notes "Установочный файл svitlo-widget.apk. Установленное приложение обновляется отсюда само."
+          fi

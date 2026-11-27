@@ -157,6 +157,7 @@ public class MonitorService extends Service {
                 boolean any = false;
                 for (String ch : Store.threatChannelList(this)) any |= checkThreats(ch);
                 notifyForecast(); // и по новым сообщениям, и когда старые теряют силу
+                Updater.maybeCheck(this, false);
                 if (any) publish();
                 Thread.sleep(THREAT_EVERY_MS);
             } catch (InterruptedException e) {
