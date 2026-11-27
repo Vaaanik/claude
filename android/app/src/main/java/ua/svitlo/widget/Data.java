@@ -69,34 +69,55 @@ final class Data {
         return "https://t.me/s/" + channel + (after > 0 ? "?after=" + after : "");
     }
 
-    static Channel parseChannel(String html) {
-        Channel ch = new Channel();
+    /** Одно сообщение канала как есть. */
+    static final class Raw {
+        long id;
+        long timeMs;
+        String text = "";   // переносы строк сохранены
+    }
+
+    /** Все сообщения со страницы канала, от старых к новым. */
+    static List<Raw> posts(String html) {
+        List<Raw> out = new ArrayList<>();
         String[] blocks = html.split("tgme_widget_message_wrap");
         for (int i = 1; i < blocks.length; i++) {
             String b = blocks[i];
             Matcher p = POST.matcher(b);
             if (!p.find()) continue;
-            long id = Long.parseLong(p.group(1));
-            ch.lastId = Math.max(ch.lastId, id);
+            Raw r = new Raw();
+            r.id = Long.parseLong(p.group(1));
             Matcher t = TEXT.matcher(b);
-            if (!t.find()) continue;
-            String text = t.group(1).replaceAll("<br\\s*/?>", " ").replaceAll("<[^>]+>", "")
-                    .replace("&#33;", "!").replace("&quot;", "\"").replace("&amp;", "&")
-                    .replaceAll("\\s+", " ").trim();
-            Boolean kind = classify(text);
-            if (kind == null) continue;
-            if (ch.last != null && ch.last.id > id) continue;
-            Post post = new Post();
-            post.id = id;
-            post.alert = kind;
-            post.text = text;
+            if (t.find()) {
+                r.text = t.group(1).replaceAll("<br\\s*/?>", "\n").replaceAll("<[^>]+>", "")
+                        .replace("&#33;", "!").replace("&#39;", "'").replace("&#036;", "$")
+                        .replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">")
+                        .replace("&nbsp;", " ").replace("&amp;", "&")
+                        .replaceAll("[ \\t]+", " ").trim();
+            }
             Matcher tm = TIME.matcher(b);
             if (tm.find()) {
                 try {
-                    post.timeMs = ZonedDateTime.parse(tm.group(1)).toInstant().toEpochMilli();
+                    r.timeMs = ZonedDateTime.parse(tm.group(1)).toInstant().toEpochMilli();
                 } catch (Exception ignored) {
                 }
             }
+            out.add(r);
+        }
+        out.sort((x, y) -> Long.compare(x.id, y.id));
+        return out;
+    }
+
+    static Channel parseChannel(String html) {
+        Channel ch = new Channel();
+        for (Raw r : posts(html)) {
+            ch.lastId = Math.max(ch.lastId, r.id);
+            Boolean kind = classify(r.text);
+            if (kind == null) continue;
+            Post post = new Post();
+            post.id = r.id;
+            post.alert = kind;
+            post.text = r.text.replaceAll("\\s+", " ").trim();
+            post.timeMs = r.timeMs;
             ch.last = post;
         }
         return ch;

@@ -21,6 +21,8 @@ import android.widget.TextView;
 
 import org.json.JSONObject;
 
+import java.util.List;
+
 /** Экран настроек и текущего состояния. */
 public class MainActivity extends Activity {
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -48,6 +50,25 @@ public class MainActivity extends Activity {
         channel.setText(Store.channel(this));
         box.addView(channel);
 
+        box.addView(label("\nКаналы об угрозах — ракеты, БпЛА (через запятую)"));
+        final EditText threatCh = new EditText(this);
+        threatCh.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        threatCh.setText(Store.threatChannels(this));
+        box.addView(threatCh);
+
+        box.addView(label("\nСлова «мой город» (через запятую)"));
+        final EditText cityW = new EditText(this);
+        cityW.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        cityW.setText(Store.cityWords(this));
+        box.addView(cityW);
+
+        box.addView(label("\nСлова «рядом»: район и подступы (через запятую)"));
+        final EditText areaW = new EditText(this);
+        areaW.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        areaW.setText(Store.areaWords(this));
+        box.addView(areaW);
+
         box.addView(label("\nГруппа (очередь) отключений ДТЭК, например 4.1"));
         final EditText group = new EditText(this);
         group.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
@@ -68,7 +89,7 @@ public class MainActivity extends Activity {
         battery.setText("Разрешить работу в фоне без ограничений");
         box.addView(battery);
 
-        box.addView(label("\nИсточники: тревога — Telegram-канал выше (проверка каждые 10 секунд); "
+        box.addView(label("\nИсточники: тревога — канал сирены (каждые 10 секунд); угрозы — каналы из списка (каждые 15 секунд), показываются только сообщения со словами из двух списков; "
                 + "свет — сайт dtek-dnem.com.ua (каждые 5 минут).\n\n"
                 + "Виджет: долгое нажатие на пустом месте главного экрана → Виджеты → "
                 + "«Тревога и свет».\n\n"
@@ -80,9 +101,7 @@ public class MainActivity extends Activity {
         setContentView(scroll);
 
         save.setOnClickListener(v -> {
-            String ch = channel.getText().toString().trim()
-                    .replaceFirst("^(https?://)?t\\.me/(s/)?", "").replaceFirst("^@", "")
-                    .replaceAll("[/?].*$", "");
+            String ch = Store.cleanChannel(channel.getText().toString());
             int mins = 30;
             try {
                 mins = Integer.parseInt(remind.getText().toString().trim());
@@ -92,7 +111,10 @@ public class MainActivity extends Activity {
             SharedPreferences.Editor e = p.edit()
                     .putString("channel", ch.isEmpty() ? Data.DEFAULT_CHANNEL : ch)
                     .putString("group", group.getText().toString().trim().replace(',', '.'))
-                    .putInt("remind", mins);
+                    .putInt("remind", mins)
+                    .putString("threatChannels", threatCh.getText().toString().trim())
+                    .putString("cityWords", cityW.getText().toString().trim())
+                    .putString("areaWords", areaW.getText().toString().trim());
             if (channelChanged) {
                 e.remove("alert").remove("alertSince").remove("lastPostId").remove("alertChecked");
             }
@@ -157,6 +179,15 @@ public class MainActivity extends Activity {
         if (checked > 0) {
             s.append("\nпроверено ").append((System.currentTimeMillis() - checked) / 1000)
                     .append(" с назад");
+        }
+        List<Threats.Item> th = Store.threats(this, 3 * 3600_000L);
+        s.append("\n\nУгрозы за 3 часа:");
+        if (th.isEmpty()) s.append(" сообщений про ваш город и район не было");
+        for (int i = 0; i < th.size() && i < 8; i++) s.append("\n• ").append(Store.line(th.get(i)));
+        for (String c : Store.threatChannelList(this)) {
+            long ok = Store.p(this).getLong("ok_" + c, 0);
+            s.append("\n").append(c).append(": ").append(ok == 0 ? "ещё не читался"
+                    : "проверен " + (System.currentTimeMillis() - ok) / 1000 + " с назад");
         }
         s.append("\n\n").append(Store.powerLine(this));
         JSONObject fact = Store.fact(this);

@@ -30,6 +30,18 @@
         android:textSize="12sp" />
 
     <TextView
+        android:id="@+id/threats"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:maxLines="4"
+        android:ellipsize="end"
+        android:textColor="#FFF59D"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:visibility="gone" />
+
+    <TextView
         android:id="@+id/power"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

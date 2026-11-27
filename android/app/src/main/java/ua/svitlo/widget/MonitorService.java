@@ -19,6 +19,7 @@ import org.json.JSONObject;
 
 import java.time.Duration;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -32,17 +33,24 @@ public class MonitorService extends Service {
     static volatile boolean running;
 
     private static final long ALERT_EVERY_MS = 10_000;
+    private static final long THREAT_EVERY_MS = 15_000;
+    /** При первом чтении канала показываем только свежее, без уведомлений. */
+    private static final long THREAT_BACKLOG_MS = 30 * 60_000;
+    /** Длинные посты — сводки и новости, а не оперативные предупреждения. */
+    private static final int THREAT_MAX_LEN = 600;
     private static final long DTEK_EVERY_MS = 5 * 60_000;
     private static final long DTEK_RETRY_MS = 60_000;
 
     private static final String CH_SERVICE = "service";
     private static final String CH_ALERT = "alert";
     private static final String CH_POWER = "power";
-    private static final int ID_SERVICE = 1, ID_ALERT = 2, ID_POWER = 3, ID_REMIND = 4;
+    private static final String CH_THREAT = "threat";
+    private static final int ID_SERVICE = 1, ID_ALERT = 2, ID_POWER = 3, ID_REMIND = 4, ID_THREAT = 100;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final DtekFetcher dtek = new DtekFetcher();
     private Thread loop;
+    private Thread threatLoop;
     private PowerManager.WakeLock wake;
     private long nextDtek;
     private String shownStatus = "";
@@ -63,6 +71,8 @@ public class MonitorService extends Service {
         nm.createNotificationChannel(new NotificationChannel(CH_SERVICE, "Работа в фоне",
                 NotificationManager.IMPORTANCE_LOW));
         nm.createNotificationChannel(new NotificationChannel(CH_ALERT, "Воздушная тревога",
+                NotificationManager.IMPORTANCE_HIGH));
+        nm.createNotificationChannel(new NotificationChannel(CH_THREAT, "Угрозы: ракеты и БпЛА",
                 NotificationManager.IMPORTANCE_HIGH));
         nm.createNotificationChannel(new NotificationChannel(CH_POWER, "Отключения света",
                 NotificationManager.IMPORTANCE_DEFAULT));
@@ -85,6 +95,8 @@ public class MonitorService extends Service {
             wake.acquire();
             loop = new Thread(this::run, "monitor");
             loop.start();
+            threatLoop = new Thread(this::runThreats, "threats");
+            threatLoop.start();
         }
         return START_STICKY;
     }
@@ -94,6 +106,8 @@ public class MonitorService extends Service {
         running = false;
         if (loop != null) loop.interrupt();
         loop = null;
+        if (threatLoop != null) threatLoop.interrupt();
+        threatLoop = null;
         if (wake != null && wake.isHeld()) wake.release();
         super.onDestroy();
     }
@@ -129,6 +143,79 @@ public class MonitorService extends Service {
                 }
             }
         }
+    }
+
+    // ---------------------------------------------------------------- угрозы
+
+    private void runThreats() {
+        while (running) {
+            try {
+                boolean any = false;
+                for (String ch : Store.threatChannelList(this)) any |= checkThreats(ch);
+                if (any) publish();
+                Thread.sleep(THREAT_EVERY_MS);
+            } catch (InterruptedException e) {
+                return;
+            } catch (Throwable t) {
+                try {
+                    Thread.sleep(THREAT_EVERY_MS);
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+        }
+    }
+
+    /** Читает новые сообщения канала; true, если появились сообщения про наши места. */
+    private boolean checkThreats(String channel) {
+        SharedPreferences p = Store.p(this);
+        String key = "last_" + channel;
+        long lastId = p.getLong(key, 0);
+        List<Data.Raw> posts;
+        try {
+            posts = Data.posts(Data.get(Data.channelUrl(channel, lastId)));
+        } catch (Exception e) {
+            p.edit().putString("err_" + channel, "нет связи").apply();
+            return false;
+        }
+        SharedPreferences.Editor ed = p.edit().putLong("ok_" + channel, System.currentTimeMillis())
+                .remove("err_" + channel);
+        if (posts.isEmpty()) {
+            ed.apply();
+            return false;
+        }
+        String[] city = Threats.stems(Store.cityWords(this));
+        String[] area = Threats.stems(Store.areaWords(this));
+        long now = System.currentTimeMillis();
+        List<Threats.Item> found = new ArrayList<>();
+        long max = lastId;
+        for (Data.Raw r : posts) {
+            max = Math.max(max, r.id);
+            if (r.id <= lastId) continue;
+            if (lastId == 0 && now - r.timeMs > THREAT_BACKLOG_MS) continue;
+            Threats.Item it = Threats.extract(channel, r, city, area, THREAT_MAX_LEN);
+            if (it != null) found.add(it);
+        }
+        ed.putLong(key, max).apply();
+        if (found.isEmpty()) return false;
+        Store.addThreats(this, found);
+        if (lastId != 0) for (Threats.Item it : found) notifyThreat(it);
+        return true;
+    }
+
+    private void notifyThreat(Threats.Item it) {
+        Notification n = new Notification.Builder(this, CH_THREAT)
+                .setSmallIcon(android.R.drawable.stat_sys_warning)
+                .setContentTitle(it.type + (it.city ? " · Кривой Рог" : " · рядом"))
+                .setContentText(it.text)
+                .setStyle(new Notification.BigTextStyle().bigText(it.text + "\n— " + it.source))
+                .setWhen(it.timeMs > 0 ? it.timeMs : System.currentTimeMillis())
+                .setShowWhen(true)
+                .setContentIntent(open(this))
+                .setAutoCancel(true)
+                .build();
+        // отдельное уведомление на каждое сообщение, чтобы новое не затирало старое
+        getSystemService(NotificationManager.class).notify(ID_THREAT + (int) (it.id % 1000), n);
     }
 
     private void publish() {

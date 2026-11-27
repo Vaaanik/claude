@@ -8,7 +8,10 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.os.SystemClock;
+import android.view.View;
 import android.widget.RemoteViews;
+
+import java.util.List;
 
 /** Виджет: тревога + ближайшее отключение света. Нажатие открывает приложение. */
 public class StatusWidget extends AppWidgetProvider {
@@ -16,6 +19,8 @@ public class StatusWidget extends AppWidgetProvider {
     private static final long EVERY_MS = 60 * 1000;
     /** Если проверка старше этого — данные считаются устаревшими. */
     private static final long STALE_MS = 90 * 1000;
+    /** Сколько сообщение об угрозе держится на виджете. */
+    static final long THREAT_SHOW_MS = 30 * 60 * 1000;
 
     private static PendingIntent refreshIntent(Context c) {
         Intent i = new Intent(c, StatusWidget.class).setAction(ACTION_REFRESH);
@@ -94,6 +99,19 @@ public class StatusWidget extends AppWidgetProvider {
             v.setInt(R.id.root, "setBackgroundResource", R.drawable.bg_clear);
             v.setTextViewText(R.id.alert_title, "✅ Тревоги нет");
             v.setTextViewText(R.id.alert_sub, "Кривой Рог · отбой в " + Data.hm(Store.alertSince(c)));
+        }
+        // Угрозы за последние 30 минут: две самые свежие
+        List<Threats.Item> th = Store.threats(c, THREAT_SHOW_MS);
+        if (th.isEmpty()) {
+            v.setViewVisibility(R.id.threats, View.GONE);
+        } else {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < th.size() && i < 2; i++) {
+                if (i > 0) sb.append('\n');
+                sb.append(Store.line(th.get(i)));
+            }
+            v.setTextViewText(R.id.threats, sb.toString());
+            v.setViewVisibility(R.id.threats, View.VISIBLE);
         }
         v.setTextViewText(R.id.power, Store.powerLine(c));
         long fetched = Store.factFetched(c);
