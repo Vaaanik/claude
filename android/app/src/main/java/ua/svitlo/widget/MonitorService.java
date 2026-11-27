@@ -74,9 +74,9 @@ public class MonitorService extends Service {
                 NotificationManager.IMPORTANCE_LOW));
         nm.createNotificationChannel(new NotificationChannel(CH_ALERT, "Воздушная тревога",
                 NotificationManager.IMPORTANCE_HIGH));
-        nm.createNotificationChannel(new NotificationChannel(CH_THREAT, "Угрозы: ракеты и БпЛА",
+        nm.createNotificationChannel(new NotificationChannel(CH_THREAT, "Летит к городу / над городом",
                 NotificationManager.IMPORTANCE_HIGH));
-        nm.createNotificationChannel(new NotificationChannel(CH_LOCAL, "Местные каналы: обстановка",
+        nm.createNotificationChannel(new NotificationChannel(CH_LOCAL, "Цель рядом с городом",
                 NotificationManager.IMPORTANCE_DEFAULT));
         nm.createNotificationChannel(new NotificationChannel(CH_POWER, "Отключения света",
                 NotificationManager.IMPORTANCE_DEFAULT));
@@ -156,6 +156,7 @@ public class MonitorService extends Service {
             try {
                 boolean any = false;
                 for (String ch : Store.threatChannelList(this)) any |= checkThreats(ch);
+                notifyForecast(); // и по новым сообщениям, и когда старые теряют силу
                 if (any) publish();
                 Thread.sleep(THREAT_EVERY_MS);
             } catch (InterruptedException e) {
@@ -205,24 +206,33 @@ public class MonitorService extends Service {
         ed.putLong(key, max).apply();
         if (found.isEmpty()) return false;
         Store.addThreats(this, found);
-        if (lastId != 0) for (Threats.Item it : found) notifyThreat(it);
         return true;
     }
 
-    private void notifyThreat(Threats.Item it) {
-        Notification n = new Notification.Builder(this, it.local ? CH_LOCAL : CH_THREAT)
+    /**
+     * Уведомляет, когда прогноз для города стал тревожнее: «рядом», «летит к городу»,
+     * «над городом». Отдельные сообщения каналов уведомлений не дают — они в истории.
+     */
+    private void notifyForecast() {
+        Forecast.Result r = Store.forecast(this);
+        SharedPreferences p = Store.p(this);
+        int before = p.getInt("forecastLevel", Forecast.NONE);
+        if (r.level == before) return;
+        p.edit().putInt("forecastLevel", r.level).apply();
+        if (r.level <= before || r.level < Forecast.NEAR) return;
+        boolean loud = r.level >= Forecast.TOWARD;
+        String body = (r.eta.isEmpty() ? "" : r.eta + "\n") + r.detail
+                + (r.basis.isEmpty() ? "" : "\n" + r.basis);
+        Notification n = new Notification.Builder(this, loud ? CH_THREAT : CH_LOCAL)
                 .setSmallIcon(android.R.drawable.stat_sys_warning)
-                .setContentTitle(it.type + (it.city ? " · Кривой Рог" : " · рядом") + " · " + it.source)
-                .setContentText(it.text)
-                .setStyle(new Notification.BigTextStyle().bigText(it.text + "\n— " + it.source))
-                .setWhen(it.timeMs > 0 ? it.timeMs : System.currentTimeMillis())
+                .setContentTitle(r.title)
+                .setContentText(r.eta.isEmpty() ? r.detail : r.eta + " · " + r.detail)
+                .setStyle(new Notification.BigTextStyle().bigText(body.trim()))
                 .setShowWhen(true)
                 .setContentIntent(open(this))
                 .setAutoCancel(true)
                 .build();
-        // одно уведомление на канал: новое сообщение заменяет предыдущее из того же канала
-        getSystemService(NotificationManager.class)
-                .notify(ID_THREAT + Math.floorMod(it.source.hashCode(), 1000), n);
+        getSystemService(NotificationManager.class).notify(ID_THREAT, n);
     }
 
     private void publish() {

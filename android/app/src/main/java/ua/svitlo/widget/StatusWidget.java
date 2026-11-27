@@ -11,7 +11,6 @@ import android.os.SystemClock;
 import android.view.View;
 import android.widget.RemoteViews;
 
-import java.util.List;
 
 /** Виджет: тревога + ближайшее отключение света. Нажатие открывает приложение. */
 public class StatusWidget extends AppWidgetProvider {
@@ -100,16 +99,15 @@ public class StatusWidget extends AppWidgetProvider {
             v.setTextViewText(R.id.alert_title, "✅ Тревоги нет");
             v.setTextViewText(R.id.alert_sub, "Кривой Рог · отбой в " + Data.hm(Store.alertSince(c)));
         }
-        // Угрозы за последние 30 минут: три самые свежие
-        List<Threats.Item> th = Store.threats(c, THREAT_SHOW_MS);
-        if (th.isEmpty()) {
+        // Прогноз для города и последнее сообщение, на котором он основан
+        Forecast.Result fc = Store.forecast(c);
+        if (fc.level == Forecast.NONE) {
             v.setViewVisibility(R.id.threats, View.GONE);
         } else {
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < th.size() && i < 3; i++) {
-                if (i > 0) sb.append('\n');
-                sb.append(Store.line(th.get(i)));
-            }
+            StringBuilder sb = new StringBuilder(fc.title);
+            if (!fc.eta.isEmpty()) sb.append(" · ").append(fc.eta);
+            if (!fc.detail.isEmpty() && fc.level != Forecast.GONE) sb.append('\n').append(fc.detail);
+            if (!fc.basis.isEmpty()) sb.append('\n').append(fc.basis);
             v.setTextViewText(R.id.threats, sb.toString());
             v.setViewVisibility(R.id.threats, View.VISIBLE);
         }

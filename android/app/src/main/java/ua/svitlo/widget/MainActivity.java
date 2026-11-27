@@ -40,6 +40,8 @@ public class MainActivity extends Activity {
 
     private LinearLayout statusCard;
     private TextView statusTitle, statusSub;
+    private LinearLayout fcCard;
+    private TextView fcTitle, fcEta, fcDetail, fcBasis;
     private TextView historyTitle, historyEmpty;
     private LinearLayout historyRows;
     private String historyKey = "";
@@ -67,6 +69,16 @@ public class MainActivity extends Activity {
         statusCard.setPadding(dp(20), dp(22), dp(20), dp(22));
         statusTitle = text(statusCard, "", 30, 0xFFFFFFFF, true);
         statusSub = text(statusCard, "", 15, 0xE6FFFFFF, false);
+
+        // ---- прогноз для города
+        fcCard = card(root, CARD);
+        text(fcCard, "Прогноз для Кривого Рога", 13, DIM, true);
+        fcTitle = text(fcCard, "", 22, TEXT, true);
+        fcEta = text(fcCard, "", 19, TEXT, true);
+        fcDetail = text(fcCard, "", 15, TEXT, false);
+        fcBasis = text(fcCard, "", 13, DIM, false);
+        text(fcCard, "Оценка по названиям мест в сообщениях каналов, не данные радаров. "
+                + "Время подлёта приблизительное.", 11, DIM, false);
 
         // ---- ход тревоги
         LinearLayout hist = card(root, CARD);
@@ -211,6 +223,7 @@ public class MainActivity extends Activity {
     private void show() {
         long now = System.currentTimeMillis();
         showStatus(now);
+        showForecast();
         showHistory(now);
         showPower();
         showSources(now);
@@ -241,6 +254,20 @@ public class MainActivity extends Activity {
             statusTitle.setText("Тревоги нет");
             statusSub.setText("Кривой Рог · отбой в " + Data.hm(since) + " · тихо " + dur(now - since));
         }
+    }
+
+    private void showForecast() {
+        Forecast.Result r = Store.forecast(this);
+        fcTitle.setText(r.title);
+        fcTitle.setTextColor(r.level == Forecast.OVER ? 0xFFFF6B6F : r.level == Forecast.TOWARD
+                ? ORANGE : r.level == Forecast.NEAR ? 0xFFF2C94C : r.level == Forecast.GONE
+                ? 0xFF5FD08A : TEXT);
+        fcEta.setText(r.eta);
+        fcEta.setVisibility(r.eta.isEmpty() ? View.GONE : View.VISIBLE);
+        fcDetail.setText(r.detail);
+        fcDetail.setVisibility(r.detail.isEmpty() ? View.GONE : View.VISIBLE);
+        fcBasis.setText(r.basis.isEmpty() ? "" : "Основание: " + r.basis);
+        fcBasis.setVisibility(r.basis.isEmpty() ? View.GONE : View.VISIBLE);
     }
 
     /** Все сообщения об угрозах за одну тревогу — текущую или последнюю. */
