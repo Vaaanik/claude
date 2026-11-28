@@ -11,7 +11,7 @@ import java.util.regex.Pattern;
  * Это грубая оценка по названиям мест в сообщениях, а не данные радаров.
  */
 final class Forecast {
-    static final int NONE = 0, GONE = 1, NEAR = 2, TOWARD = 3, OVER = 4;
+    static final int NONE = 0, GONE = 1, NEAR = 2, TOWARD = 3, OVER = 4, MINE = 5;
 
     /** Сообщение старше этого в прогнозе не участвует. */
     static final long FRESH_MS = 12 * 60_000;
@@ -27,6 +27,8 @@ final class Forecast {
         long timeMs;
         String source = "";
         String text = "";
+        boolean mine;         // назван «мой район» — как место или как цель курса
+        String districts = ""; // какие районы города названы
     }
 
     /** Итог для экрана и виджета. */
@@ -58,7 +60,23 @@ final class Forecast {
             "(?:від|повз|біля|північніше|південніше|східніше|західніше|район[іу])\\s+$");
 
     /** Разбирает одно сообщение. */
-    static Obs observe(Threats.Item it) {
+    /** Слова «мой район» (через запятую) -> шаблон; короткие «цм», «цг» ищутся как отдельные слова. */
+    static Pattern minePattern(String csv) {
+        StringBuilder sb = new StringBuilder();
+        for (String w : Threats.norm(csv).split("[,\\n]")) {
+            w = w.trim();
+            if (w.length() < 2) continue;
+            if (sb.length() > 0) sb.append('|');
+            String q = Pattern.quote(w).replace(" ", "\\E\\s*-?\\s*\\Q").replace("-", "\\E\\s*-?\\s*\\Q");
+            // короткое сокращение — только отдельным словом («цг», но не «цгзк»);
+            // длинное — как начало слова с любым окончанием
+            sb.append(w.length() <= 3 ? q + "(?![а-яіїєґa-z0-9])" : q);
+        }
+        if (sb.length() == 0) return null;
+        return Pattern.compile("(?<![а-яіїєґa-z0-9'])(?:" + sb + ")");
+    }
+
+    static Obs observe(Threats.Item it, Pattern mine) {
         Obs o = new Obs();
         o.timeMs = it.timeMs;
         o.source = it.source;
@@ -99,8 +117,12 @@ final class Forecast {
         List<Geo.Hit> hits = Geo.find(n);
         boolean cityHere = false, cityDest = false, cityNear = false;
         Geo.Place pos = null, dest = null;
+        StringBuilder named = new StringBuilder();
         for (Geo.Hit h : hits) {
             boolean isDest = h.at > destAt;
+            if (h.place.inCity && h.place != Geo.PLACES.get(0) && named.indexOf(h.place.name) < 0) {
+                named.append(named.length() > 0 ? ", " : "").append(h.place.name);
+            }
             if (h.place.inCity) {
                 String before = n.substring(0, h.at);
                 if (FROM_CITY.matcher(before).find()) cityNear = true;
@@ -113,6 +135,18 @@ final class Forecast {
             }
         }
         o.pos = pos;
+        o.districts = named.toString();
+        if (mine != null) {
+            Matcher mm = mine.matcher(n);
+            if (mm.find()) {
+                o.mine = true;
+                // «мой район» — это тоже город, даже если его нет в справочнике
+                String before = n.substring(0, mm.start());
+                if (FROM_CITY.matcher(before).find()) cityNear = true;
+                else if (mm.start() > destAt) cityDest = true;
+                else cityHere = true;
+            }
+        }
 
         if (away && !cityDest) {
             // «чисто», «вилетів», «пішов на …» — цель уходит
@@ -120,7 +154,7 @@ final class Forecast {
                     || n.contains("чисто") || n.contains("без загроз")) ? GONE : NONE;
             // «Без загроз. Софіївка Широке» — место названо, но угрозы городу нет
         } else if (cityHere) {
-            o.level = OVER;
+            o.level = o.mine ? MINE : OVER;
         } else if (cityDest) {
             o.level = TOWARD;
         } else if (cityNear) {
@@ -141,6 +175,7 @@ final class Forecast {
     /** Сколько минут наблюдение остаётся в силе, если его не сменило более свежее. */
     private static double holdMin(Obs o) {
         switch (o.level) {
+            case MINE:
             case OVER: return 5;
             case TOWARD:
                 if (o.ballistic) return 5;
@@ -159,7 +194,7 @@ final class Forecast {
      * сообщение держится своё время (подлёта), и понизить его раньше срока
      * может только тот же канал, который его дал.
      */
-    static Result evaluate(List<Threats.Item> items, long now, boolean alertActive) {
+    static Result evaluate(List<Threats.Item> items, long now, boolean alertActive, Pattern mine) {
         items.sort((a, b) -> Long.compare(a.timeMs, b.timeMs));
         Obs cur = null;
         long curUntil = 0;
@@ -167,7 +202,7 @@ final class Forecast {
         Map<String, Obs> lastPos = new HashMap<>();
         for (Threats.Item it : items) {
             if (now - it.timeMs > 30 * 60_000 || it.timeMs > now + 60_000) continue;
-            Obs o = observe(it);
+            Obs o = observe(it, mine);
             if (o.level == NONE) continue;
 
             // тенденция: тот же канал до этого называл другое место
@@ -208,12 +243,19 @@ final class Forecast {
                 + " км " + best.pos.side + " от города";
 
         switch (level) {
+            case MINE:
+                r.title = "🔴 НАД ВАШИМ РАЙОНОМ";
+                r.detail = "Названо: " + (best.districts.isEmpty() ? "ваш район" : best.districts)
+                        + (ageMin > 0 ? " (" + ageMin + " мин назад)" : "");
+                break;
             case OVER:
-                r.title = "🔴 Над городом";
-                r.detail = "Цель в черте Кривого Рога" + (ageMin > 0 ? " (" + ageMin + " мин назад)" : "");
+                r.title = best.districts.isEmpty() ? "🔴 Над городом" : "🔴 Над городом · не ваш район";
+                r.detail = (best.districts.isEmpty() ? "Цель в черте Кривого Рога, район не назван"
+                        : "Названо: " + best.districts)
+                        + (ageMin > 0 ? " (" + ageMin + " мин назад)" : "");
                 break;
             case TOWARD:
-                r.title = "🟠 Летит к Кривому Рогу";
+                r.title = best.mine ? "🟠 Летит НА ВАШ РАЙОН" : "🟠 Летит к Кривому Рогу";
                 if (best.ballistic) {
                     r.eta = "подлёт 1–3 мин";
                 } else if (best.pos != null) {

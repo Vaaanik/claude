@@ -189,9 +189,14 @@ final class Store {
         p(c).edit().putString("threats", arr.toString()).apply();
     }
 
+    static String myWords(Context c) {
+        return p(c).getString("myWords", Threats.DEFAULT_MINE);
+    }
+
     /** Прогноз для города по сообщениям последних минут. */
     static Forecast.Result forecast(Context c) {
-        return Forecast.evaluate(threats(c, 40 * 60_000L), System.currentTimeMillis(), alert(c) == 1);
+        return Forecast.evaluate(threats(c, 40 * 60_000L), System.currentTimeMillis(), alert(c) == 1,
+                Forecast.minePattern(myWords(c)));
     }
 
     /** Строка для виджета/ленты: "23:41 🛵 БпЛА: текст · канал". */

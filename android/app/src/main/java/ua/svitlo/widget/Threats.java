@@ -52,6 +52,9 @@ final class Threats {
             "скинути фото", "повідомити", "📞"};
     private static final int LOCAL_MAX_LEN = 300;
 
+    /** Слова «мой район» по умолчанию: Центрально-Городской район. */
+    static final String DEFAULT_MINE = "цм, цг, центрально-міськ, центрально-город";
+
     private static final String OBLAST = "дніпропетровщ";
 
     static final class Item {
@@ -194,7 +197,8 @@ final class Threats {
         essence = essence.replaceFirst("^[.\\s]+", "").replaceFirst("[.\\s]+$", "");
         if (essence.length() < 4 || essence.length() > LOCAL_MAX_LEN) return null;
         String n = norm(essence);
-        if (!hasAny(n, LOCAL, false) && !hasAny(n, city, true) && !hasAny(n, area, true)) return null;
+        if (!hasAny(n, LOCAL, false) && !hasAny(n, city, true) && !hasAny(n, area, true)
+                && Geo.find(n).isEmpty()) return null;
         Item it = new Item();
         it.source = source;
         it.id = post.id;

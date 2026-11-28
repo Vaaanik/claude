@@ -74,6 +74,7 @@ public class MainActivity extends Activity {
         fcCard = card(root, CARD);
         text(fcCard, "Прогноз для Кривого Рога", 13, DIM, true);
         fcTitle = text(fcCard, "", 22, TEXT, true);
+        fcCard.setPadding(dp(16), dp(14), dp(16), dp(14));
         fcEta = text(fcCard, "", 19, TEXT, true);
         fcDetail = text(fcCard, "", 15, TEXT, false);
         fcBasis = text(fcCard, "", 13, DIM, false);
@@ -139,6 +140,7 @@ public class MainActivity extends Activity {
         final EditText channel = field("Канал сирены (имя после t.me/)", Store.channel(this), false);
         final EditText threatCh = field("Каналы об угрозах, через запятую\n"
                 + "(* после имени — местный канал, где всё про ваш город)", Store.threatChannels(this), true);
+        final EditText myW = field("Слова «мой район» (как его пишут в каналах)", Store.myWords(this), true);
         final EditText cityW = field("Слова «мой город», через запятую", Store.cityWords(this), true);
         final EditText areaW = field("Слова «рядом»: район и подступы", Store.areaWords(this), true);
         final EditText group = field("Группа (очередь) отключений ДТЭК", Store.group(this), false);
@@ -178,6 +180,7 @@ public class MainActivity extends Activity {
                     .putInt("remind", mins)
                     .putString("threatChannels", threatCh.getText().toString().trim())
                     .putString("cityWords", cityW.getText().toString().trim())
+                    .putString("myWords", myW.getText().toString().trim())
                     .putString("areaWords", areaW.getText().toString().trim());
             if (channelChanged) {
                 e.remove("alert").remove("alertSince").remove("lastPostId").remove("alertChecked")
@@ -274,9 +277,12 @@ public class MainActivity extends Activity {
     private void showForecast() {
         Forecast.Result r = Store.forecast(this);
         fcTitle.setText(r.title);
-        fcTitle.setTextColor(r.level == Forecast.OVER ? 0xFFFF6B6F : r.level == Forecast.TOWARD
+        fcTitle.setTextColor(r.level >= Forecast.OVER ? 0xFFFF6B6F : r.level == Forecast.TOWARD
                 ? ORANGE : r.level == Forecast.NEAR ? 0xFFF2C94C : r.level == Forecast.GONE
                 ? 0xFF5FD08A : TEXT);
+        // когда речь о вашем районе — вся карточка красная
+        tint(fcCard, r.level == Forecast.MINE ? 0xFF8E1B22
+                : r.level == Forecast.TOWARD && r.title.contains("ВАШ") ? 0xFF7A4A12 : CARD);
         fcEta.setText(r.eta);
         fcEta.setVisibility(r.eta.isEmpty() ? View.GONE : View.VISIBLE);
         fcDetail.setText(r.detail);
