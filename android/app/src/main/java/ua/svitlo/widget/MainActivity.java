@@ -35,7 +35,12 @@ public class MainActivity extends Activity {
             DIM = 0xFF9AA4AF, RED = 0xFFE5484D, GREEN = 0xFF2E9E5B, GREY = 0xFF55606C,
             ORANGE = 0xFFF2913D, BLUE = 0xFF4C8DF6;
 
+    /** Открыт ли сейчас экран приложения (тогда окно обновления можно показать сразу). */
+    static volatile boolean visible;
+
     private final Handler main = new Handler(Looper.getMainLooper());
+    private LinearLayout updCard;
+    private TextView updText;
     private float d;
 
     private LinearLayout statusCard;
@@ -63,6 +68,29 @@ public class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(14), dp(14), dp(14), dp(24));
         root.setFitsSystemWindows(true);
+
+        // ---- обновление (видно только когда вышла новая сборка)
+        updCard = card(root, 0xFF24406B);
+        updText = text(updCard, "", 15, TEXT, false);
+        Button updNow = button(updCard, "Обновить", BLUE);
+        updCard.setVisibility(View.GONE);
+        updNow.setOnClickListener(v -> {
+            if (!getPackageManager().canRequestPackageInstalls()) {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + getPackageName())));
+            } else if (Updater.pendingConfirm != null) {
+                Intent confirm = Updater.pendingConfirm;
+                Updater.pendingConfirm = null;
+                try {
+                    startActivity(confirm);
+                } catch (Exception e) {
+                    new Thread(() -> Updater.maybeCheck(getApplicationContext(), true)).start();
+                }
+            } else {
+                updText.setText("Скачиваю обновление…");
+                new Thread(() -> Updater.maybeCheck(getApplicationContext(), true)).start();
+            }
+        });
 
         // ---- тревога
         statusCard = card(root, GREY);
@@ -247,11 +275,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        visible = true;
         tick.run();
     }
 
     @Override
     protected void onPause() {
+        visible = false;
         main.removeCallbacks(tick);
         super.onPause();
     }
@@ -266,6 +296,14 @@ public class MainActivity extends Activity {
 
     private void show() {
         long now = System.currentTimeMillis();
+        boolean upd = Updater.available(this);
+        updCard.setVisibility(upd ? View.VISIBLE : View.GONE);
+        if (upd) {
+            String st = Store.p(this).getString("updState", "");
+            String err = Store.p(this).getString("updError", "");
+            updText.setText("Вышла новая версия " + Store.p(this).getString("updLatestName", "")
+                    + (st.isEmpty() ? "" : "\n" + st) + (err.isEmpty() ? "" : "\n⚠️ " + err));
+        }
         showStatus(now);
         showForecast();
         showHistory(now);

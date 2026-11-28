@@ -33,7 +33,14 @@ public class Updater extends BroadcastReceiver {
     static final String ACTION_STATUS = "ua.svitlo.widget.UPDATE_STATUS";
     private static final long CHECK_EVERY_MS = 15 * 60_000;
     private static final long RETRY_SAME_MS = 3 * 3600_000L;
-    private static final String CH = "update";
+    private static final String CH = "update2";
+
+    /** Окно подтверждения от системы, которое ждёт пользователя (если тихо поставить не удалось). */
+    static volatile Intent pendingConfirm;
+
+    private static void state(Context c, String s) {
+        Store.p(c).edit().putString("updState", s).apply();
+    }
     private static final int ID = 50;
 
     static long installedCode(Context c) {
@@ -63,7 +70,10 @@ public class Updater extends BroadcastReceiver {
             long code = v.getLong("versionCode");
             p.edit().putLong("updLatest", code).putString("updLatestName", v.optString("versionName"))
                     .putString("updError", "").apply();
-            if (code <= installedCode(c)) return;
+            if (code <= installedCode(c)) {
+                state(c, "");
+                return;
+            }
             // одну и ту же сборку не качаем по кругу, если установка не прошла
             if (!force && code == p.getLong("updTried", 0)
                     && now - p.getLong("updTriedAt", 0) < RETRY_SAME_MS) return;
@@ -78,13 +88,18 @@ public class Updater extends BroadcastReceiver {
                                         Uri.parse("package:" + c.getPackageName())),
                                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
                 p.edit().putLong("updTriedAt", 0).apply(); // попробуем снова при следующей проверке
+                state(c, "нужно разрешение на установку");
                 return;
             }
             File apk = new File(c.getCacheDir(), "update.apk");
+            state(c, "скачиваю");
             download(BASE + "svitlo-widget.apk", apk);
+            state(c, "скачано " + apk.length() / 1024 + " КБ, передаю системе");
             install(c, apk);
+            state(c, "передано системе, жду ответа");
         } catch (Exception e) {
-            p.edit().putString("updError", String.valueOf(e.getMessage())).apply();
+            p.edit().putString("updError", e.getClass().getSimpleName() + ": " + e.getMessage()).apply();
+            state(c, "ошибка");
         }
     }
 
@@ -132,24 +147,47 @@ public class Updater extends BroadcastReceiver {
         if (!ACTION_STATUS.equals(i.getAction())) return;
         int status = i.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
         if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
-            // система хочет подтверждения — показываем уведомление, по нажатию откроется её окно
+            // Система хочет подтверждения. Если приложение открыто — показываем её окно сразу,
+            // иначе — уведомление и кнопка «Обновить» в приложении.
             Intent confirm = i.getParcelableExtra(Intent.EXTRA_INTENT);
-            if (confirm == null) return;
+            if (confirm == null) {
+                state(c, "система просит подтверждение, но не дала окно");
+                return;
+            }
             confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            pendingConfirm = confirm;
+            state(c, "ждёт вашего подтверждения — нажмите «Обновить»");
+            if (MainActivity.visible) {
+                try {
+                    c.startActivity(confirm);
+                    pendingConfirm = null;
+                    return;
+                } catch (Exception ignored) {
+                }
+            }
             notify(c, "Обновление готово", "Нажмите, чтобы установить новую версию.",
                     PendingIntent.getActivity(c, 4, confirm,
                             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
         } else if (status != PackageInstaller.STATUS_SUCCESS) {
-            Store.p(c).edit().putString("updError", "установка не прошла: "
-                    + i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)).apply();
+            String msg = "установка не прошла (код " + status + "): "
+                    + i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
+            Store.p(c).edit().putString("updError", msg).putLong("updTriedAt", 0).apply();
+            state(c, "ошибка");
+        } else {
+            state(c, "");
         }
         // при успехе система сама перезапустит приложение (см. BootReceiver)
+    }
+
+    /** Есть ли сборка новее установленной (по последней проверке). */
+    static boolean available(Context c) {
+        return Store.p(c).getLong("updLatest", 0) > installedCode(c);
     }
 
     private static void notify(Context c, String title, String text, PendingIntent tap) {
         NotificationManager nm = c.getSystemService(NotificationManager.class);
         nm.createNotificationChannel(new NotificationChannel(CH, "Обновления приложения",
-                NotificationManager.IMPORTANCE_DEFAULT));
+                NotificationManager.IMPORTANCE_HIGH));
         nm.notify(ID, new Notification.Builder(c, CH)
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
                 .setContentTitle(title)
@@ -166,7 +204,10 @@ public class Updater extends BroadcastReceiver {
         long latest = p.getLong("updLatest", 0);
         long mine = installedCode(c);
         String s = "Версия " + installedName(c) + " (сборка " + mine + ")";
-        if (latest > mine) s += " · есть новая " + p.getString("updLatestName", "") + ", ставится";
+        if (latest > mine) {
+            String st = p.getString("updState", "");
+            s += " · есть новая " + p.getString("updLatestName", "") + (st.isEmpty() ? "" : ": " + st);
+        }
         else if (latest > 0) s += " · последняя";
         long checked = p.getLong("updChecked", 0);
         if (checked > 0) s += " · проверено в " + Data.hm(checked);
