@@ -1,28 +1,46 @@
 package ua.svitlo.widget;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Оценка «летит ли к Кривому Рогу и когда будет» по цепочке сообщений каналов.
+ * Оценка «летит ли к Кривому Рогу, к моему району и когда будет» по цепочке
+ * сообщений всех каналов. Расстояния и время считаются до точки «дом».
  * Это грубая оценка по названиям мест в сообщениях, а не данные радаров.
  */
 final class Forecast {
     static final int NONE = 0, GONE = 1, NEAR = 2, TOWARD = 3, OVER = 4, MINE = 5;
 
-    /** Сообщение старше этого в прогнозе не участвует. */
-    static final long FRESH_MS = 12 * 60_000;
-    /** Дальше этого «рядом» не считается. */
+    /** Виды уведомлений: только то, что опасно именно здесь. */
+    static final int N_NONE = 0, N_MISSILE = 1, N_TOWARD_MINE = 2, N_OVER_MINE = 3;
+
+    /** Дальше этого от города «рядом» не считается. */
     private static final double NEAR_KM = 70;
+    /** Место ближе этого к дому считается «моим районом», даже если район не назван. */
+    private static final double HOME_KM = 2.5;
+
+    /** Точка «дом» и слова «мой район». */
+    static final class Home {
+        final double lat, lon;
+        final Pattern mine;
+
+        Home(double lat, double lon, Pattern mine) {
+            this.lat = lat;
+            this.lon = lon;
+            this.mine = mine;
+        }
+
+        double km(Geo.Place p) {
+            return Geo.distance(lat, lon, p.lat, p.lon);
+        }
+    }
 
     /** Что понято из одного сообщения. */
     static final class Obs {
         int level = NONE;
-        Geo.Place pos;        // где цель сейчас (если названо место вне города)
-        boolean ballistic;
+        Geo.Place at;         // где цель сейчас: ближайшее к дому из названных мест (может быть null)
+        boolean ballistic, missile;
         double vMin, vMax;    // скорость, км/ч
         long timeMs;
         String source = "";
@@ -36,9 +54,11 @@ final class Forecast {
         int level = NONE;
         String title = "";
         String eta = "";      // «≈ 5–9 мин» или ""
-        String detail = "";   // место, расстояние, тенденция
+        String detail = "";   // место, расстояние до дома, тенденция
         String basis = "";    // сообщение, на котором основан вывод
         long timeMs;
+        int notify = N_NONE;  // нужно ли уведомление и какое
+        String key = "";      // какое сообщение дало вывод (чтобы не уведомлять дважды)
     }
 
     private static final Pattern DEST = Pattern.compile(
@@ -59,24 +79,35 @@ final class Forecast {
     private static final Pattern FROM_CITY = Pattern.compile(
             "(?:від|повз|біля|північніше|південніше|східніше|західніше|район[іу])\\s+$");
 
-    /** Разбирает одно сообщение. */
     /** Слова «мой район» (через запятую) -> шаблон; короткие «цм», «цг» ищутся как отдельные слова. */
     static Pattern minePattern(String csv) {
         StringBuilder sb = new StringBuilder();
         for (String w : Threats.norm(csv).split("[,\\n]")) {
             w = w.trim();
             if (w.length() < 2) continue;
+            // «центрально-міськ» должно ловить и «центрально міськ», и «центрально - міськ»
+            StringBuilder q = new StringBuilder();
+            for (String part : w.split("[\\s-]+")) {
+                if (part.isEmpty()) continue;
+                if (q.length() > 0) q.append("\\s*-?\\s*");
+                q.append(Pattern.quote(part));
+            }
+            if (q.length() == 0) continue;
             if (sb.length() > 0) sb.append('|');
-            String q = Pattern.quote(w).replace(" ", "\\E\\s*-?\\s*\\Q").replace("-", "\\E\\s*-?\\s*\\Q");
             // короткое сокращение — только отдельным словом («цг», но не «цгзк»);
             // длинное — как начало слова с любым окончанием
-            sb.append(w.length() <= 3 ? q + "(?![а-яіїєґa-z0-9])" : q);
+            sb.append(w.length() <= 3 ? q + "(?![а-яіїєґa-z0-9])" : q.toString());
         }
         if (sb.length() == 0) return null;
-        return Pattern.compile("(?<![а-яіїєґa-z0-9'])(?:" + sb + ")");
+        try {
+            return Pattern.compile("(?<![а-яіїєґa-z0-9'])(?:" + sb + ")");
+        } catch (Exception e) {
+            return null; // странный ввод в настройках не должен ронять приложение
+        }
     }
 
-    static Obs observe(Threats.Item it, Pattern mine) {
+    /** Разбирает одно сообщение. */
+    static Obs observe(Threats.Item it, Home home) {
         Obs o = new Obs();
         o.timeMs = it.timeMs;
         o.source = it.source;
@@ -89,6 +120,7 @@ final class Forecast {
 
         String type = it.type;
         o.ballistic = type.contains("Баллистика");
+        o.missile = o.ballistic || type.contains("Ракета") || type.contains("КАБ");
         if (o.ballistic) {
             o.vMin = 3000;
             o.vMax = 6000;
@@ -108,7 +140,6 @@ final class Forecast {
 
         Matcher dm = DEST.matcher(n);
         int destAt = dm.find() ? dm.start() : Integer.MAX_VALUE;
-
         if (destAt != Integer.MAX_VALUE) {
             String tail = n.substring(destAt);
             for (String rg : REGIONS) if (tail.contains(rg)) away = true;
@@ -116,14 +147,15 @@ final class Forecast {
 
         List<Geo.Hit> hits = Geo.find(n);
         boolean cityHere = false, cityDest = false, cityNear = false;
-        Geo.Place pos = null, dest = null;
+        Geo.Place pos = null, dest = null, at = null;
         StringBuilder named = new StringBuilder();
         for (Geo.Hit h : hits) {
             boolean isDest = h.at > destAt;
-            if (h.place.inCity && h.place != Geo.PLACES.get(0) && named.indexOf(h.place.name) < 0) {
-                named.append(named.length() > 0 ? ", " : "").append(h.place.name);
-            }
+            boolean hasPoint = !Double.isNaN(h.place.lat);
             if (h.place.inCity) {
+                if (hasPoint && named.indexOf(h.place.name) < 0) {
+                    named.append(named.length() > 0 ? ", " : "").append(h.place.name);
+                }
                 String before = n.substring(0, h.at);
                 if (FROM_CITY.matcher(before).find()) cityNear = true;
                 else if (isDest) cityDest = true;
@@ -131,30 +163,42 @@ final class Forecast {
             } else if (isDest) {
                 if (dest == null) dest = h.place;
             } else if (pos == null || h.place.km < pos.km) {
-                pos = h.place; // из нескольких названных мест берём ближайшее к городу
+                pos = h.place; // из нескольких мест вне города берём ближайшее к городу
             }
+            // текущее место цели — ближайшее к дому из названных «здесь»
+            if (!isDest && hasPoint && (at == null || home.km(h.place) < home.km(at))) at = h.place;
         }
-        o.pos = pos;
+        o.at = at;
         o.districts = named.toString();
-        if (mine != null) {
-            Matcher mm = mine.matcher(n);
+
+        // «мой район»: назван словом или названо место вплотную к дому
+        boolean mineHere = false, mineDest = false;
+        if (home.mine != null) {
+            Matcher mm = home.mine.matcher(n);
             if (mm.find()) {
-                o.mine = true;
-                // «мой район» — это тоже город, даже если его нет в справочнике
                 String before = n.substring(0, mm.start());
                 if (FROM_CITY.matcher(before).find()) cityNear = true;
-                else if (mm.start() > destAt) cityDest = true;
-                else cityHere = true;
+                else if (mm.start() > destAt) mineDest = true;
+                else mineHere = true;
             }
         }
+        for (Geo.Hit h : hits) {
+            if (Double.isNaN(h.place.lat) || home.km(h.place) > HOME_KM) continue;
+            if (h.at > destAt) mineDest = true;
+            else mineHere = true;
+        }
+        if (mineHere) cityHere = true;
+        if (mineDest) cityDest = true;
+        o.mine = mineHere || mineDest;
 
         if (away && !cityDest) {
             // «чисто», «вилетів», «пішов на …» — цель уходит
             o.level = (cityHere || cityNear || pos != null || dest != null
                     || n.contains("чисто") || n.contains("без загроз")) ? GONE : NONE;
-            // «Без загроз. Софіївка Широке» — место названо, но угрозы городу нет
+        } else if (mineHere) {
+            o.level = MINE;
         } else if (cityHere) {
-            o.level = o.mine ? MINE : OVER;
+            o.level = OVER;
         } else if (cityDest) {
             o.level = TOWARD;
         } else if (cityNear) {
@@ -163,7 +207,7 @@ final class Forecast {
             // курс на место вплотную к городу считаем курсом на город
             o.level = dest.km <= 20 ? TOWARD : (pos != null && pos.km <= NEAR_KM) || dest.km <= NEAR_KM
                     ? NEAR : NONE;
-            if (o.pos == null && o.level == NEAR) o.pos = dest;
+            if (o.at == null && o.level == NEAR) o.at = dest;
         } else if (pos != null) {
             o.level = pos.km <= NEAR_KM ? NEAR : NONE;
         } else if (o.ballistic && n.contains("загроза")) {
@@ -173,54 +217,55 @@ final class Forecast {
     }
 
     /** Сколько минут наблюдение остаётся в силе, если его не сменило более свежее. */
-    private static double holdMin(Obs o) {
+    private static double holdMin(Obs o, Home home) {
         switch (o.level) {
             case MINE:
             case OVER: return 5;
             case TOWARD:
                 if (o.ballistic) return 5;
-                if (o.pos == null) return 8;
-                return Math.min(20, o.pos.km / o.vMin * 60 + 3);
+                if (o.at == null) return 8;
+                return Math.min(20, home.km(o.at) / o.vMin * 60 + 3);
             case NEAR: return 7;
             default: return 12;
         }
     }
 
     /**
-     * Сводит сообщения последних минут в один вывод. items — в любом порядке,
-     * alertActive — идёт ли сейчас тревога.
+     * Сводит сообщения всех каналов за последние минуты в один вывод.
      *
      * Правило: действует самое свежее осмысленное сообщение. Более тревожное
      * сообщение держится своё время (подлёта), и понизить его раньше срока
      * может только тот же канал, который его дал.
      */
-    static Result evaluate(List<Threats.Item> items, long now, boolean alertActive, Pattern mine) {
+    static Result evaluate(List<Threats.Item> items, long now, boolean alertActive, Home home) {
         items.sort((a, b) -> Long.compare(a.timeMs, b.timeMs));
         Obs cur = null;
         long curUntil = 0;
         String trend = "";
-        Map<String, Obs> lastPos = new HashMap<>();
+        Obs lastAt = null; // последнее названное место по всем каналам — для тенденции
         for (Threats.Item it : items) {
             if (now - it.timeMs > 30 * 60_000 || it.timeMs > now + 60_000) continue;
-            Obs o = observe(it, mine);
+            Obs o = observe(it, home);
             if (o.level == NONE) continue;
 
-            // тенденция: тот же канал до этого называл другое место
+            // тенденция относительно дома: предыдущее место было дальше или ближе
             String tr = "";
-            Obs pv = lastPos.get(o.source);
-            if (o.pos != null && pv != null && pv.pos != o.pos && o.timeMs - pv.timeMs < 10 * 60_000) {
-                double diff = pv.pos.km - o.pos.km;
-                if (diff >= 8) tr = "приближается";
-                else if (diff <= -8) tr = "удаляется";
+            if (o.at != null && o.level != GONE) {
+                if (lastAt != null && lastAt.at != o.at && o.timeMs - lastAt.timeMs < 8 * 60_000) {
+                    double was = home.km(lastAt.at), is = home.km(o.at);
+                    double step = Math.max(2, was * 0.2); // в городе значим и шаг в пару км
+                    if (was - is >= step) tr = "приближается к вам";
+                    else if (is - was >= step) tr = "удаляется от вас";
+                }
+                lastAt = o;
             }
-            if (o.pos != null && o.level != GONE) lastPos.put(o.source, o);
-            if (o.level == NEAR && tr.equals("приближается") && o.pos.km <= 35) o.level = TOWARD;
+            if (o.level == NEAR && tr.startsWith("прибл") && home.km(o.at) <= 35) o.level = TOWARD;
 
             boolean replace = cur == null || o.level >= cur.level || o.source.equals(cur.source)
                     || o.timeMs >= curUntil;
             if (replace) {
                 cur = o;
-                curUntil = o.timeMs + (long) (holdMin(o) * 60_000);
+                curUntil = o.timeMs + (long) (holdMin(o, home) * 60_000);
                 trend = tr;
             }
         }
@@ -233,54 +278,71 @@ final class Forecast {
             return r;
         }
         Obs best = cur;
-        int level = best.level;
-
-        r.level = level;
+        r.level = best.level;
         r.timeMs = best.timeMs;
+        r.key = best.source + "/" + best.timeMs;
         r.basis = Data.hm(best.timeMs) + " · " + best.source + ": " + best.text;
         long ageMin = Math.max(0, (now - best.timeMs) / 60_000);
-        String where = best.pos == null ? "" : best.pos.name + " — " + Math.round(best.pos.km)
-                + " км " + best.pos.side + " от города";
+        String age = ageMin > 0 ? " (" + ageMin + " мин назад)" : "";
+        double elapsed = (now - best.timeMs) / 60_000.0;
 
-        switch (level) {
+        // где цель и сколько до дома
+        String where = "";
+        String ifTurns = "";
+        if (best.at != null) {
+            double km = home.km(best.at);
+            where = best.at.name + " — " + fmtKm(km) + " "
+                    + Geo.side(home.lat, home.lon, best.at.lat, best.at.lon) + " от вас";
+            ifTurns = eta(km, best, elapsed);
+        }
+        String tr = trend.isEmpty() ? "" : " · " + trend;
+
+        switch (best.level) {
             case MINE:
                 r.title = "🔴 НАД ВАШИМ РАЙОНОМ";
-                r.detail = "Названо: " + (best.districts.isEmpty() ? "ваш район" : best.districts)
-                        + (ageMin > 0 ? " (" + ageMin + " мин назад)" : "");
+                r.detail = (where.isEmpty() ? "Назван ваш район" : where) + age;
+                r.notify = N_OVER_MINE;
                 break;
             case OVER:
                 r.title = best.districts.isEmpty() ? "🔴 Над городом" : "🔴 Над городом · не ваш район";
-                r.detail = (best.districts.isEmpty() ? "Цель в черте Кривого Рога, район не назван"
-                        : "Названо: " + best.districts)
-                        + (ageMin > 0 ? " (" + ageMin + " мин назад)" : "");
+                r.detail = (where.isEmpty() ? "Район не назван — где именно, неизвестно" : where)
+                        + tr + age;
+                if (!ifTurns.isEmpty()) r.eta = "если повернёт к вам: " + ifTurns;
+                if (best.missile) r.notify = N_MISSILE;
                 break;
             case TOWARD:
                 r.title = best.mine ? "🟠 Летит НА ВАШ РАЙОН" : "🟠 Летит к Кривому Рогу";
-                if (best.ballistic) {
-                    r.eta = "подлёт 1–3 мин";
-                } else if (best.pos != null) {
-                    double elapsed = (now - best.timeMs) / 60_000.0;
-                    long lo = Math.round(best.pos.km / best.vMax * 60 - elapsed);
-                    long hi = Math.round(best.pos.km / best.vMin * 60 - elapsed);
-                    r.eta = hi <= 0 ? "уже может быть над городом"
-                            : lo <= 0 ? "в ближайшие " + hi + " мин"
-                            : "≈ через " + lo + "–" + hi + " мин";
-                } else {
-                    r.eta = "время подлёта неизвестно";
-                }
-                r.detail = where.isEmpty() ? "Где цель сейчас, каналы не назвали" : where;
+                r.eta = best.ballistic ? "подлёт 1–3 мин"
+                        : ifTurns.isEmpty() ? "время подлёта неизвестно" : "до вас " + ifTurns;
+                r.detail = (where.isEmpty() ? "Где цель сейчас, каналы не назвали" : where) + tr;
+                r.notify = best.missile ? N_MISSILE : best.mine ? N_TOWARD_MINE : N_NONE;
                 break;
             case NEAR:
                 r.title = "🟡 Рядом, курс не на город";
                 r.detail = (where.isEmpty() ? (best.ballistic ? "Общая угроза баллистики"
-                        : "Проходит мимо города") : where)
-                        + (trend.isEmpty() ? "" : " · " + trend);
+                        : "Проходит мимо города") : where) + tr;
                 break;
             default:
                 r.title = "🟢 По последним сообщениям ушло";
                 r.detail = alertActive ? "Тревога не снята — оставайтесь в укрытии до отбоя." : "";
         }
         return r;
+    }
+
+    /** Время подлёта до дома при расстоянии km, с учётом прошедшего времени. */
+    private static String eta(double km, Obs o, double elapsedMin) {
+        if (o.ballistic) return "1–3 мин";
+        long lo = Math.round(km / o.vMax * 60 - elapsedMin);
+        long hi = Math.round(km / o.vMin * 60 - elapsedMin);
+        if (hi <= 0) return "уже может быть рядом";
+        if (hi <= 1) return "меньше минуты";
+        if (lo <= 0) return "в ближайшие " + hi + " мин";
+        return lo == hi ? "≈ " + lo + " мин" : "≈ " + lo + "–" + hi + " мин";
+    }
+
+    private static String fmtKm(double km) {
+        return km < 10 ? String.format(java.util.Locale.ROOT, "%.1f", km).replace('.', ',') + " км"
+                : Math.round(km) + " км";
     }
 
     private Forecast() {

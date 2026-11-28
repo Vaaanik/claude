@@ -53,7 +53,11 @@ final class Threats {
     private static final int LOCAL_MAX_LEN = 300;
 
     /** Слова «мой район» по умолчанию: Центрально-Городской район. */
-    static final String DEFAULT_MINE = "цм, цг, центрально-міськ, центрально-город";
+    static final String DEFAULT_MINE = "цм, цг, центрально-міськ, центрально-город, центр міста, "
+            + "гданцівк, карачун";
+
+    /** Точка «дом» по умолчанию: центр Центрально-Городского района. */
+    static final double HOME_LAT = 47.905, HOME_LON = 33.343;
 
     private static final String OBLAST = "дніпропетровщ";
 

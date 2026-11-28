@@ -72,14 +72,14 @@ public class MainActivity extends Activity {
 
         // ---- прогноз для города
         fcCard = card(root, CARD);
-        text(fcCard, "Прогноз для Кривого Рога", 13, DIM, true);
+        text(fcCard, "Прогноз для вас · Кривой Рог, ЦМ", 13, DIM, true);
         fcTitle = text(fcCard, "", 22, TEXT, true);
         fcCard.setPadding(dp(16), dp(14), dp(16), dp(14));
         fcEta = text(fcCard, "", 19, TEXT, true);
         fcDetail = text(fcCard, "", 15, TEXT, false);
         fcBasis = text(fcCard, "", 13, DIM, false);
-        text(fcCard, "Оценка по названиям мест в сообщениях каналов, не данные радаров. "
-                + "Время подлёта приблизительное.", 11, DIM, false);
+        text(fcCard, "Оценка по названиям мест в сообщениях всех каналов, не данные радаров. "
+                + "Расстояния — до вашей точки, время подлёта приблизительное.", 11, DIM, false);
 
         // ---- ход тревоги
         LinearLayout hist = card(root, CARD);
@@ -141,6 +141,13 @@ public class MainActivity extends Activity {
         final EditText threatCh = field("Каналы об угрозах, через запятую\n"
                 + "(* после имени — местный канал, где всё про ваш город)", Store.threatChannels(this), true);
         final EditText myW = field("Слова «мой район» (как его пишут в каналах)", Store.myWords(this), true);
+        final EditText homeP = field("Точка дома: широта, долгота (в Google Картах — долгое нажатие "
+                + "на своём доме, скопировать два числа)", Store.homeText(this), false);
+        final android.widget.CheckBox siren = new android.widget.CheckBox(this);
+        siren.setText("Уведомлять о начале тревоги и отбое");
+        siren.setTextColor(TEXT);
+        siren.setChecked(Store.sirenNotify(this));
+        settings.addView(siren);
         final EditText cityW = field("Слова «мой город», через запятую", Store.cityWords(this), true);
         final EditText areaW = field("Слова «рядом»: район и подступы", Store.areaWords(this), true);
         final EditText group = field("Группа (очередь) отключений ДТЭК", Store.group(this), false);
@@ -181,7 +188,14 @@ public class MainActivity extends Activity {
                     .putString("threatChannels", threatCh.getText().toString().trim())
                     .putString("cityWords", cityW.getText().toString().trim())
                     .putString("myWords", myW.getText().toString().trim())
+                    .putBoolean("sirenNotify", siren.isChecked())
                     .putString("areaWords", areaW.getText().toString().trim());
+            try {
+                String[] ll = homeP.getText().toString().trim().split("[,;\\s]+");
+                float la = Float.parseFloat(ll[0]), lo = Float.parseFloat(ll[1]);
+                if (la > 47 && la < 49 && lo > 32 && lo < 35) e.putFloat("homeLat", la).putFloat("homeLon", lo);
+            } catch (Exception ignored) {
+            }
             if (channelChanged) {
                 e.remove("alert").remove("alertSince").remove("lastPostId").remove("alertChecked")
                         .remove("alertStart").remove("alertEnd");

@@ -99,8 +99,12 @@ final class Store {
     /** Разовое добавление новых каналов по умолчанию к уже сохранённому списку. */
     static void migrate(Context c) {
         SharedPreferences sp = p(c);
-        if (sp.getInt("defaultsVersion", 0) >= 5) return;
-        SharedPreferences.Editor e = sp.edit().putInt("defaultsVersion", 5);
+        if (sp.getInt("defaultsVersion", 0) >= 6) return;
+        SharedPreferences.Editor e = sp.edit().putInt("defaultsVersion", 6);
+        // прежний список слов района был короче — возвращаем к новому по умолчанию
+        if ("цм, цг, центрально-міськ, центрально-город".equals(sp.getString("myWords", null))) {
+            e.remove("myWords");
+        }
         // прежняя группа по умолчанию была 4.2 — заменяем на 8.1
         if ("4.2".equals(sp.getString("group", null))) e.putString("group", "8.1");
         String saved = sp.getString("threatChannels", null);
@@ -193,10 +197,29 @@ final class Store {
         return p(c).getString("myWords", Threats.DEFAULT_MINE);
     }
 
+    /** Точка «дом»: по умолчанию центр района, можно уточнить в настройках. */
+    static Forecast.Home home(Context c) {
+        SharedPreferences sp = p(c);
+        return new Forecast.Home(sp.getFloat("homeLat", (float) Threats.HOME_LAT),
+                sp.getFloat("homeLon", (float) Threats.HOME_LON), Forecast.minePattern(myWords(c)));
+    }
+
+    static String homeText(Context c) {
+        SharedPreferences sp = p(c);
+        return String.format(java.util.Locale.ROOT, "%.4f, %.4f",
+                sp.getFloat("homeLat", (float) Threats.HOME_LAT),
+                sp.getFloat("homeLon", (float) Threats.HOME_LON));
+    }
+
+    /** Уведомлять ли о начале тревоги и отбое (по умолчанию нет — это видно на виджете). */
+    static boolean sirenNotify(Context c) {
+        return p(c).getBoolean("sirenNotify", false);
+    }
+
     /** Прогноз для города по сообщениям последних минут. */
     static Forecast.Result forecast(Context c) {
         return Forecast.evaluate(threats(c, 40 * 60_000L), System.currentTimeMillis(), alert(c) == 1,
-                Forecast.minePattern(myWords(c)));
+                home(c));
     }
 
     /** Строка для виджета/ленты: "23:41 🛵 БпЛА: текст · канал". */

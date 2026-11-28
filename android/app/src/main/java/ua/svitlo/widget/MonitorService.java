@@ -74,10 +74,9 @@ public class MonitorService extends Service {
                 NotificationManager.IMPORTANCE_LOW));
         nm.createNotificationChannel(new NotificationChannel(CH_ALERT, "Воздушная тревога",
                 NotificationManager.IMPORTANCE_HIGH));
-        nm.createNotificationChannel(new NotificationChannel(CH_THREAT, "Летит к городу / над городом",
+        nm.createNotificationChannel(new NotificationChannel(CH_THREAT, "Опасно в моём районе, ракеты на город",
                 NotificationManager.IMPORTANCE_HIGH));
-        nm.createNotificationChannel(new NotificationChannel(CH_LOCAL, "Цель рядом с городом",
-                NotificationManager.IMPORTANCE_DEFAULT));
+        nm.deleteNotificationChannel(CH_LOCAL); // больше не используется
         nm.createNotificationChannel(new NotificationChannel(CH_POWER, "Отключения света",
                 NotificationManager.IMPORTANCE_DEFAULT));
     }
@@ -211,25 +210,38 @@ public class MonitorService extends Service {
     }
 
     /**
-     * Уведомляет, когда прогноз для города стал тревожнее: «рядом», «летит к городу»,
-     * «над городом». Отдельные сообщения каналов уведомлений не дают — они в истории.
+     * Уведомление приходит только в двух случаях: цель над вашим районом или
+     * летит на него; ракета/баллистика/КАБ на Кривой Рог. Всё остальное —
+     * только на карточке и виджете.
      */
     private void notifyForecast() {
         Forecast.Result r = Store.forecast(this);
         SharedPreferences p = Store.p(this);
-        int before = p.getInt("forecastLevel", Forecast.NONE);
-        if (r.level == before) return;
-        p.edit().putInt("forecastLevel", r.level).apply();
-        if (r.level <= before || r.level < Forecast.NEAR) return;
-        boolean loud = r.level >= Forecast.TOWARD;
+        int lastKind = p.getInt("fcKind", Forecast.N_NONE);
+        String lastKey = p.getString("fcKey", "");
+        long lastAt = p.getLong("fcAt", 0);
+        long now = System.currentTimeMillis();
+        if (r.notify == Forecast.N_NONE) {
+            if (lastKind != Forecast.N_NONE) p.edit().putInt("fcKind", Forecast.N_NONE).apply();
+            return;
+        }
+        // новое уведомление — при появлении опасности, при её усилении
+        // и на новое сообщение о ракете (но не чаще раза в 2 минуты)
+        boolean fresh = lastKind == Forecast.N_NONE || r.notify > lastKind
+                || (!r.key.equals(lastKey) && r.notify == Forecast.N_MISSILE && now - lastAt > 120_000)
+                || (!r.key.equals(lastKey) && now - lastAt > 15 * 60_000);
+        p.edit().putInt("fcKind", r.notify).apply();
+        if (!fresh) return;
+        p.edit().putString("fcKey", r.key).putLong("fcAt", now).apply();
         String body = (r.eta.isEmpty() ? "" : r.eta + "\n") + r.detail
                 + (r.basis.isEmpty() ? "" : "\n" + r.basis);
-        Notification n = new Notification.Builder(this, loud ? CH_THREAT : CH_LOCAL)
+        Notification n = new Notification.Builder(this, CH_THREAT)
                 .setSmallIcon(android.R.drawable.stat_sys_warning)
                 .setContentTitle(r.title)
                 .setContentText(r.eta.isEmpty() ? r.detail : r.eta + " · " + r.detail)
                 .setStyle(new Notification.BigTextStyle().bigText(body.trim()))
                 .setShowWhen(true)
+                .setCategory(Notification.CATEGORY_ALARM)
                 .setContentIntent(open(this))
                 .setAutoCancel(true)
                 .build();
@@ -284,7 +296,7 @@ public class MonitorService extends Service {
                 }
                 e.apply();
                 // При первом запуске не шумим — только показываем состояние.
-                if (changed && notify && before != -1) notifyAlert(c, ch.last);
+                if (changed && notify && before != -1 && Store.sirenNotify(c)) notifyAlert(c, ch.last);
             } else {
                 e.apply();
             }
