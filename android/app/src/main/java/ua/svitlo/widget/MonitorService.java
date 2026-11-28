@@ -1,13 +1,10 @@
 package ua.svitlo.widget;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
 import android.app.NotificationManager;
-import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.Handler;
@@ -15,18 +12,10 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
 
-import org.json.JSONObject;
-
-import java.time.Duration;
-import java.time.ZonedDateTime;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-
 /**
- * Постоянный фоновый сервис: каждые 10 секунд проверяет канал с тревогами,
- * каждые 5 минут — график на сайте ДТЭК, обновляет виджет и шлёт уведомления.
+ * Режим «без сервера»: постоянная фоновая служба, телефон сам каждые 10–15 секунд
+ * опрашивает каналы. Надёжно, но расходует батарею. В режиме «через сервер»
+ * эта служба не запускается — данные приходят push-сообщениями (см. PushService).
  */
 public class MonitorService extends Service {
     static final String ACTION_DTEK_NOW = "ua.svitlo.widget.DTEK_NOW";
@@ -34,19 +23,8 @@ public class MonitorService extends Service {
 
     private static final long ALERT_EVERY_MS = 10_000;
     private static final long THREAT_EVERY_MS = 15_000;
-    /** При первом чтении канала берём последние часы — без уведомлений, для истории. */
-    private static final long THREAT_BACKLOG_MS = 3 * 3600_000;
-    /** Длинные посты — сводки и новости, а не оперативные предупреждения. */
-    private static final int THREAT_MAX_LEN = 400;
     private static final long DTEK_EVERY_MS = 5 * 60_000;
     private static final long DTEK_RETRY_MS = 60_000;
-
-    private static final String CH_SERVICE = "service";
-    private static final String CH_ALERT = "alert";
-    private static final String CH_POWER = "power";
-    private static final String CH_THREAT = "threat";
-    private static final String CH_LOCAL = "local";
-    private static final int ID_SERVICE = 1, ID_ALERT = 2, ID_POWER = 3, ID_REMIND = 4, ID_THREAT = 100;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final DtekFetcher dtek = new DtekFetcher();
@@ -69,25 +47,16 @@ public class MonitorService extends Service {
     public void onCreate() {
         super.onCreate();
         Store.migrate(this);
-        NotificationManager nm = getSystemService(NotificationManager.class);
-        nm.createNotificationChannel(new NotificationChannel(CH_SERVICE, "Работа в фоне",
-                NotificationManager.IMPORTANCE_LOW));
-        nm.createNotificationChannel(new NotificationChannel(CH_ALERT, "Воздушная тревога",
-                NotificationManager.IMPORTANCE_HIGH));
-        nm.createNotificationChannel(new NotificationChannel(CH_THREAT, "Опасно в моём районе, ракеты на город",
-                NotificationManager.IMPORTANCE_HIGH));
-        nm.deleteNotificationChannel(CH_LOCAL); // больше не используется
-        nm.createNotificationChannel(new NotificationChannel(CH_POWER, "Отключения света",
-                NotificationManager.IMPORTANCE_DEFAULT));
+        Work.channels(this);
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         Notification n = serviceNotification(statusLine());
         if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(ID_SERVICE, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            startForeground(Work.ID_SERVICE, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         } else {
-            startForeground(ID_SERVICE, n);
+            startForeground(Work.ID_SERVICE, n);
         }
         if (intent != null && ACTION_DTEK_NOW.equals(intent.getAction())) nextDtek = 0;
         if (loop == null) {
@@ -115,23 +84,26 @@ public class MonitorService extends Service {
         super.onDestroy();
     }
 
-    // ------------------------------------------------------------------ цикл
-
     private void run() {
         long lastMinute = -1;
         while (running) {
             try {
-                boolean changed = checkAlert(this, true);
+                boolean changed = Work.checkAlert(this, true);
 
                 long now = System.currentTimeMillis();
                 if (now >= nextDtek) {
                     nextDtek = now + DTEK_RETRY_MS;
-                    main.post(() -> dtek.fetch(this, this::onDtek));
+                    main.post(() -> dtek.fetch(this, (fact, error) -> {
+                        if (Work.onDtek(this, fact, error)) {
+                            nextDtek = System.currentTimeMillis() + DTEK_EVERY_MS;
+                        }
+                        new Thread(this::publish).start();
+                    }));
                 }
                 long minute = now / 60_000;
                 if (minute != lastMinute) {
                     lastMinute = minute;
-                    remind();
+                    Work.remind(this);
                     changed = true; // раз в минуту обновляем время и строку о свете
                 }
                 if (changed) publish();
@@ -148,14 +120,12 @@ public class MonitorService extends Service {
         }
     }
 
-    // ---------------------------------------------------------------- угрозы
-
     private void runThreats() {
         while (running) {
             try {
                 boolean any = false;
-                for (String ch : Store.threatChannelList(this)) any |= checkThreats(ch);
-                notifyForecast(); // и по новым сообщениям, и когда старые теряют силу
+                for (String ch : Store.threatChannelList(this)) any |= Work.pollThreats(this, ch);
+                Work.notifyForecast(this); // и по новым сообщениям, и когда старые теряют силу
                 Updater.maybeCheck(this, false);
                 if (any) publish();
                 Thread.sleep(THREAT_EVERY_MS);
@@ -171,89 +141,12 @@ public class MonitorService extends Service {
         }
     }
 
-    /** Читает новые сообщения канала; true, если появились сообщения про наши места. */
-    private boolean checkThreats(String entry) {
-        boolean local = entry.endsWith("*");
-        String channel = entry.replace("*", "");
-        SharedPreferences p = Store.p(this);
-        String key = "last_" + channel;
-        long lastId = p.getLong(key, 0);
-        List<Data.Raw> posts;
-        try {
-            posts = Data.posts(Data.get(Data.channelUrl(channel, lastId)));
-        } catch (Exception e) {
-            p.edit().putString("err_" + channel, "нет связи").apply();
-            return false;
-        }
-        SharedPreferences.Editor ed = p.edit().putLong("ok_" + channel, System.currentTimeMillis())
-                .remove("err_" + channel);
-        if (posts.isEmpty()) {
-            ed.apply();
-            return false;
-        }
-        String[] city = Threats.stems(Store.cityWords(this));
-        String[] area = Threats.stems(Store.areaWords(this));
-        long now = System.currentTimeMillis();
-        List<Threats.Item> found = new ArrayList<>();
-        long max = lastId;
-        for (Data.Raw r : posts) {
-            max = Math.max(max, r.id);
-            if (r.id <= lastId) continue;
-            if (lastId == 0 && now - r.timeMs > THREAT_BACKLOG_MS) continue;
-            Threats.Item it = Threats.extract(channel, local, r, city, area, THREAT_MAX_LEN);
-            if (it != null) found.add(it);
-        }
-        ed.putLong(key, max).apply();
-        if (found.isEmpty()) return false;
-        Store.addThreats(this, found);
-        return true;
-    }
-
-    /**
-     * Уведомление приходит только в двух случаях: цель над вашим районом или
-     * летит на него; ракета/баллистика/КАБ на Кривой Рог. Всё остальное —
-     * только на карточке и виджете.
-     */
-    private void notifyForecast() {
-        Forecast.Result r = Store.forecast(this);
-        SharedPreferences p = Store.p(this);
-        int lastKind = p.getInt("fcKind", Forecast.N_NONE);
-        String lastKey = p.getString("fcKey", "");
-        long lastAt = p.getLong("fcAt", 0);
-        long now = System.currentTimeMillis();
-        if (r.notify == Forecast.N_NONE) {
-            if (lastKind != Forecast.N_NONE) p.edit().putInt("fcKind", Forecast.N_NONE).apply();
-            return;
-        }
-        // новое уведомление — при появлении опасности, при её усилении
-        // и на новое сообщение о ракете (но не чаще раза в 2 минуты)
-        boolean fresh = lastKind == Forecast.N_NONE || r.notify > lastKind
-                || (!r.key.equals(lastKey) && r.notify == Forecast.N_MISSILE && now - lastAt > 120_000)
-                || (!r.key.equals(lastKey) && now - lastAt > 15 * 60_000);
-        p.edit().putInt("fcKind", r.notify).apply();
-        if (!fresh) return;
-        p.edit().putString("fcKey", r.key).putLong("fcAt", now).apply();
-        String body = (r.eta.isEmpty() ? "" : r.eta + "\n") + r.detail
-                + (r.basis.isEmpty() ? "" : "\n" + r.basis);
-        Notification n = new Notification.Builder(this, CH_THREAT)
-                .setSmallIcon(android.R.drawable.stat_sys_warning)
-                .setContentTitle(r.title)
-                .setContentText(r.eta.isEmpty() ? r.detail : r.eta + " · " + r.detail)
-                .setStyle(new Notification.BigTextStyle().bigText(body.trim()))
-                .setShowWhen(true)
-                .setCategory(Notification.CATEGORY_ALARM)
-                .setContentIntent(open(this))
-                .setAutoCancel(true)
-                .build();
-        getSystemService(NotificationManager.class).notify(ID_THREAT, n);
-    }
-
     private void publish() {
         StatusWidget.render(this);
         String s = statusLine();
         if (!s.equals(shownStatus)) {
             shownStatus = s;
-            getSystemService(NotificationManager.class).notify(ID_SERVICE, serviceNotification(s));
+            getSystemService(NotificationManager.class).notify(Work.ID_SERVICE, serviceNotification(s));
         }
     }
 
@@ -263,168 +156,14 @@ public class MonitorService extends Service {
                 + " · " + Store.powerLine(this).replaceFirst("^\\S+ ", "");
     }
 
-    // --------------------------------------------------------------- тревога
-
-    /**
-     * Проверяет канал. Возвращает true, если состояние изменилось.
-     * Используется и сервисом, и виджетом (когда сервис не запущен).
-     */
-    static synchronized boolean checkAlert(Context c, boolean notify) {
-        SharedPreferences p = Store.p(c);
-        long lastId = p.getLong("lastPostId", 0);
-        int before = p.getInt("alert", -1);
-        try {
-            // Пока состояние неизвестно, читаем всю страницу; потом — только новые сообщения.
-            long after = before == -1 ? 0 : lastId;
-            Data.Channel ch = Data.parseChannel(Data.get(Data.channelUrl(Store.channel(c), after)));
-            SharedPreferences.Editor e = p.edit().putLong("alertChecked", System.currentTimeMillis());
-            if (ch.lastId > lastId) e.putLong("lastPostId", ch.lastId);
-            boolean changed = false;
-            // границы последней тревоги — для истории «что летело за эту тревогу»
-            long start = ch.lastAlertMs > 0 ? ch.lastAlertMs : p.getLong("alertStart", 0);
-            if (ch.lastAlertMs > 0) e.putLong("alertStart", start);
-            if (ch.last != null) {
-                if (ch.last.alert) e.putLong("alertEnd", 0);
-                else if (ch.lastClearMs >= start) e.putLong("alertEnd", ch.lastClearMs);
-            }
-            if (ch.last != null) {
-                int state = ch.last.alert ? 1 : 0;
-                changed = state != before;
-                e.putInt("alert", state);
-                if (changed || p.getLong("alertSince", 0) == 0) {
-                    e.putLong("alertSince", ch.last.timeMs);
-                }
-                e.apply();
-                // При первом запуске не шумим — только показываем состояние.
-                if (changed && notify && before != -1 && Store.sirenNotify(c)) notifyAlert(c, ch.last);
-            } else {
-                e.apply();
-            }
-            return changed;
-        } catch (Exception ex) {
-            return false;
-        }
-    }
-
-    private static void notifyAlert(Context c, Data.Post post) {
-        Notification n = new Notification.Builder(c, CH_ALERT)
-                .setSmallIcon(android.R.drawable.stat_sys_warning)
-                .setContentTitle(post.alert ? "🚨 ТРЕВОГА" : "✅ Отбой тревоги")
-                .setContentText(post.text)
-                .setStyle(new Notification.BigTextStyle().bigText(post.text))
-                .setWhen(post.timeMs > 0 ? post.timeMs : System.currentTimeMillis())
-                .setShowWhen(true)
-                .setCategory(Notification.CATEGORY_ALARM)
-                .setContentIntent(open(c))
-                .setAutoCancel(true)
-                .build();
-        c.getSystemService(NotificationManager.class).notify(ID_ALERT, n);
-    }
-
-    // ------------------------------------------------------------------ свет
-
-    private void onDtek(JSONObject fact, String error) {
-        SharedPreferences p = Store.p(this);
-        if (fact == null) {
-            p.edit().putString("dtekError", error).apply();
-            return;
-        }
-        nextDtek = System.currentTimeMillis() + DTEK_EVERY_MS;
-        String group = Store.group(this);
-        ZonedDateTime now = ZonedDateTime.now(Data.KYIV);
-        String oldDays = group.equals(p.getString("daysGroup", "")) ? p.getString("days", null) : null;
-        List<ZonedDateTime[]> spans = null;
-        JSONObject days = null;
-        boolean ok = true;
-        try {
-            spans = Data.spans(fact, group);
-            days = Data.dayKeys(fact, group, now);
-        } catch (Exception e) {
-            ok = false;
-        }
-        SharedPreferences.Editor ed = p.edit().putString("fact", fact.toString())
-                .putLong("factFetched", System.currentTimeMillis())
-                .putString("dtekError", "");
-        if (ok) ed.putString("days", days == null ? "null" : days.toString()).putString("daysGroup", group);
-        ed.apply();
-
-        if (ok && Data.changed(oldDays, days)) {
-            String text = spans == null
-                    ? "В графике нет группы " + group + ". Есть: " + Data.groups(fact)
-                    : Data.summary(spans, now);
-            notifyPower(ID_POWER, oldDays == null ? "💡 График отключений" : "🔄 График отключений обновился",
-                    text + "\nГруппа " + group + " · ДТЭК, обновлено " + fact.optString("update"));
-        }
-        new Thread(this::publish).start();
-    }
-
-    /** Напоминания перед отключением и перед включением. */
-    private void remind() {
-        JSONObject fact = Store.fact(this);
-        if (fact == null) return;
-        int lead = Store.remindMinutes(this);
-        if (lead <= 0) return;
-        try {
-            List<ZonedDateTime[]> spans = Data.spans(fact, Store.group(this));
-            if (spans == null) return;
-            SharedPreferences p = Store.p(this);
-            Set<String> sent = new HashSet<>(p.getStringSet("reminded", new HashSet<>()));
-            ZonedDateTime now = ZonedDateTime.now(Data.KYIV);
-            boolean added = false;
-            for (ZonedDateTime[] sp : spans) {
-                for (int k = 0; k < 2; k++) {
-                    long left = Duration.between(now, sp[k]).toMinutes();
-                    String id = (k == 0 ? "off|" : "on|") + sp[k].toEpochSecond();
-                    if (left < 0 || left > lead || Duration.between(now, sp[k]).isNegative()
-                            || sent.contains(id)) continue;
-                    sent.add(id);
-                    added = true;
-                    if (k == 0) {
-                        notifyPower(ID_REMIND, "⏰ Через " + Math.max(1, left) + " мин отключат свет",
-                                sp[0].format(Data.HM) + "–" + sp[1].format(Data.HM)
-                                        + " · группа " + Store.group(this));
-                    } else {
-                        notifyPower(ID_REMIND, "💡 Через " + Math.max(1, left) + " мин должны включить свет",
-                                "в " + sp[1].format(Data.HM) + " · группа " + Store.group(this));
-                    }
-                }
-            }
-            if (added) {
-                long cutoff = now.minusDays(2).toEpochSecond();
-                sent.removeIf(s -> Long.parseLong(s.substring(s.indexOf('|') + 1)) < cutoff);
-                p.edit().putStringSet("reminded", sent).apply();
-            }
-        } catch (Exception ignored) {
-        }
-    }
-
-    private void notifyPower(int id, String title, String text) {
-        Notification n = new Notification.Builder(this, CH_POWER)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle(title)
-                .setContentText(text)
-                .setStyle(new Notification.BigTextStyle().bigText(text))
-                .setContentIntent(open(this))
-                .setAutoCancel(true)
-                .build();
-        getSystemService(NotificationManager.class).notify(id, n);
-    }
-
-    // ------------------------------------------------------------ служебное
-
     private Notification serviceNotification(String text) {
-        return new Notification.Builder(this, CH_SERVICE)
+        return new Notification.Builder(this, Work.CH_SERVICE)
                 .setSmallIcon(android.R.drawable.ic_popup_sync)
                 .setContentTitle(text)
                 .setContentText("Слежу за тревогой и графиком света")
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
-                .setContentIntent(open(this))
+                .setContentIntent(Work.open(this))
                 .build();
-    }
-
-    private static PendingIntent open(Context c) {
-        return PendingIntent.getActivity(c, 0, new Intent(c, MainActivity.class),
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 }

@@ -2,6 +2,21 @@ plugins {
     id "com.android.application"
 }
 
+// Настройки Firebase берутся из google-services.json (файл из консоли Firebase).
+// Без него приложение собирается и работает в режиме «телефон сам опрашивает каналы».
+def fcm = [project: "", app: "", key: "", sender: ""]
+def gs = file("google-services.json")
+if (gs.exists()) {
+    def j = new groovy.json.JsonSlurper().parse(gs)
+    def client = j.client.find { it.client_info.android_client_info.package_name == "ua.svitlo.widget" }
+    if (client != null) {
+        fcm.project = j.project_info.project_id
+        fcm.sender = j.project_info.project_number
+        fcm.app = client.client_info.mobilesdk_app_id
+        fcm.key = client.api_key[0].current_key
+    }
+}
+
 android {
     namespace "ua.svitlo.widget"
     compileSdk 35
@@ -13,7 +28,16 @@ android {
         // В CI номер сборки задаётся автоматически (-PbuildNumber=...), чтобы каждая
         // новая сборка была «новее» установленной и ставилась автообновлением.
         versionCode((project.findProperty("buildNumber") ?: "7") as int)
-        versionName "7." + (project.findProperty("buildNumber") ?: "0")
+        versionName "8." + (project.findProperty("buildNumber") ?: "0")
+
+        buildConfigField "String", "FCM_APP_ID", "\"${fcm.app}\""
+        if (fcm.app) {
+            // те же строки, что создаёт плагин google-services: по ним Firebase запускается сам
+            resValue "string", "google_app_id", fcm.app
+            resValue "string", "gcm_defaultSenderId", fcm.sender
+            resValue "string", "google_api_key", fcm.key
+            resValue "string", "project_id", fcm.project
+        }
     }
 
     signingConfigs {
@@ -36,6 +60,10 @@ android {
         }
     }
 
+    buildFeatures {
+        buildConfig true
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
@@ -44,4 +72,9 @@ android {
     lint {
         abortOnError false
     }
+}
+
+dependencies {
+    implementation platform("com.google.firebase:firebase-bom:33.7.0")
+    implementation "com.google.firebase:firebase-messaging"
 }

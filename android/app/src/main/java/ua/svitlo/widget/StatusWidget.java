@@ -16,8 +16,6 @@ import android.widget.RemoteViews;
 public class StatusWidget extends AppWidgetProvider {
     static final String ACTION_REFRESH = "ua.svitlo.widget.REFRESH";
     private static final long EVERY_MS = 60 * 1000;
-    /** Если проверка старше этого — данные считаются устаревшими. */
-    private static final long STALE_MS = 90 * 1000;
     /** Сколько сообщение об угрозе держится на виджете. */
     static final long THREAT_SHOW_MS = 30 * 60 * 1000;
 
@@ -64,8 +62,13 @@ public class StatusWidget extends AppWidgetProvider {
         final Context app = c.getApplicationContext();
         new Thread(() -> {
             try {
-                // Сервис сам всё проверяет; без него проверяем канал прямо здесь.
-                if (!MonitorService.running) MonitorService.checkAlert(app, false);
+                if (Push.serverMode(app)) {
+                    // сверяемся с сервером: жив ли он и не пропущено ли что-то
+                    Push.sync(app, false);
+                } else if (!MonitorService.running) {
+                    // служба сама всё проверяет; без неё проверяем канал прямо здесь
+                    Work.checkAlert(app, false);
+                }
                 render(app);
             } finally {
                 pending.finish();
@@ -81,7 +84,7 @@ public class StatusWidget extends AppWidgetProvider {
 
         int alert = Store.alert(c);
         long checked = Store.alertChecked(c);
-        boolean stale = System.currentTimeMillis() - checked > STALE_MS;
+        boolean stale = Push.stale(c, System.currentTimeMillis());
 
         RemoteViews v = new RemoteViews(c.getPackageName(), R.layout.widget);
         if (alert == -1 || stale) {

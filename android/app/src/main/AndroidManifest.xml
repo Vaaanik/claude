@@ -52,8 +52,24 @@
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="ua.svitlo.widget.REMIND" />
             </intent-filter>
         </receiver>
+
+        <!-- Приём сообщений сервера (Firebase) -->
+        <service
+            android:name=".PushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Загрузка графика ДТЭК раз в полчаса -->
+        <service
+            android:name=".DtekJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <receiver
             android:name=".Updater"

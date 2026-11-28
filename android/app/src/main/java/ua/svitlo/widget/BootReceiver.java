@@ -4,14 +4,33 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 
-/** Запускает слежение после перезагрузки телефона и после обновления приложения. */
+/**
+ * После перезагрузки телефона и после обновления приложения включает слежение;
+ * по будильнику — присылает напоминание о свете.
+ */
 public class BootReceiver extends BroadcastReceiver {
+    static final String ACTION_REMIND = "ua.svitlo.widget.REMIND";
+
     @Override
     public void onReceive(Context c, Intent i) {
         try {
-            MonitorService.start(c);
+            if (ACTION_REMIND.equals(i.getAction())) {
+                final PendingResult pending = goAsync();
+                final Context app = c.getApplicationContext();
+                new Thread(() -> {
+                    try {
+                        Work.remind(app);
+                        Work.scheduleReminder(app);
+                        StatusWidget.render(app);
+                    } finally {
+                        pending.finish();
+                    }
+                }).start();
+            } else {
+                Store.migrate(c);
+                Push.apply(c);
+            }
         } catch (Exception ignored) {
-            // Система не разрешила запуск из фона — сервис стартует при открытии приложения.
         }
     }
 }

@@ -143,6 +143,11 @@ public class MainActivity extends Activity {
         final EditText myW = field("Слова «мой район» (как его пишут в каналах)", Store.myWords(this), true);
         final EditText homeP = field("Точка дома: широта, долгота (в Google Картах — долгое нажатие "
                 + "на своём доме, скопировать два числа)", Store.homeText(this), false);
+        final android.widget.CheckBox server = new android.widget.CheckBox(this);
+        server.setText("Работать через сервер (экономит батарею)");
+        server.setTextColor(TEXT);
+        server.setChecked(Push.serverMode(this));
+        if (Push.configured()) settings.addView(server);
         final android.widget.CheckBox siren = new android.widget.CheckBox(this);
         siren.setText("Уведомлять о начале тревоги и отбое");
         siren.setTextColor(TEXT);
@@ -189,6 +194,7 @@ public class MainActivity extends Activity {
                     .putString("cityWords", cityW.getText().toString().trim())
                     .putString("myWords", myW.getText().toString().trim())
                     .putBoolean("sirenNotify", siren.isChecked())
+                    .putBoolean("serverMode", server.isChecked())
                     .putString("areaWords", areaW.getText().toString().trim());
             try {
                 String[] ll = homeP.getText().toString().trim().split("[,;\\s]+");
@@ -217,11 +223,21 @@ public class MainActivity extends Activity {
         });
     }
 
+    /** Включает слежение в выбранном режиме; dtekNow — сразу перечитать график света. */
     private void startMonitor(boolean dtekNow) {
         try {
-            Intent i = new Intent(this, MonitorService.class);
-            if (dtekNow) i.setAction(MonitorService.ACTION_DTEK_NOW);
-            startForegroundService(i);
+            if (Push.serverMode(this)) {
+                Push.apply(this);
+                // в режиме «через сервер» график читаем при открытии приложения
+                if (dtekNow || System.currentTimeMillis() - Store.factFetched(this) > 5 * 60_000) {
+                    DtekJob.fetchNow(this, null);
+                }
+            } else {
+                Push.apply(this);
+                Intent i = new Intent(this, MonitorService.class);
+                if (dtekNow) i.setAction(MonitorService.ACTION_DTEK_NOW);
+                startForegroundService(i);
+            }
         } catch (Exception ignored) {
         }
     }
@@ -270,7 +286,7 @@ public class MainActivity extends Activity {
     private void showStatus(long now) {
         int a = Store.alert(this);
         long checked = Store.alertChecked(this);
-        boolean stale = checked == 0 || now - checked > 90_000;
+        boolean stale = checked == 0 || Push.stale(this, now);
         long since = Store.alertSince(this);
         if (a == -1 || stale) {
             tint(statusCard, GREY);
@@ -454,7 +470,21 @@ public class MainActivity extends Activity {
         }
         long f = Store.factFetched(this);
         s.append("\nСайт ДТЭК: ").append(f == 0 ? "ещё не загружен" : "в " + Data.hm(f));
-        if (!MonitorService.running) s.append("\n⚠️ Слежение не запущено");
+        if (Push.serverMode(this)) {
+            SharedPreferences sp = Store.p(this);
+            long tick = sp.getLong("serverTick", 0), pushAt = sp.getLong("pushAt", 0);
+            s.append("\n\nРежим: через сервер")
+                    .append("\nСервер проверял каналы: ").append(tick == 0 ? "ещё неизвестно" : ago(now, tick))
+                    .append("\nПоследнее push-сообщение: ").append(pushAt == 0 ? "ещё не было" : ago(now, pushAt));
+            if (!sp.getBoolean("serverPush", true)) s.append("\n⚠️ На сервере не настроена отправка push");
+            if (!sp.getBoolean("pushSubscribed", false)) s.append("\n⚠️ Подписка на push ещё не подтверждена");
+            String pe = sp.getString("pushError", ""), se = sp.getString("serverError", "");
+            if (!pe.isEmpty()) s.append("\n⚠️ Push: ").append(pe);
+            if (!se.isEmpty()) s.append("\n⚠️ ").append(se);
+        } else {
+            s.append("\n\nРежим: телефон сам опрашивает каналы");
+            if (!MonitorService.running) s.append("\n⚠️ Слежение не запущено");
+        }
         s.append("\n\n").append(Updater.statusLine(this));
         if (!getPackageManager().canRequestPackageInstalls()) {
             s.append("\n⚠️ Автообновление выключено: нажмите «Разрешить автообновление» в настройках");

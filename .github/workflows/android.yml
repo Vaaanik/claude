@@ -32,7 +32,7 @@ jobs:
           BUILD=$((1000 + GITHUB_RUN_NUMBER))
           gradle --no-daemon assembleRelease -PbuildNumber=$BUILD
           cp app/build/outputs/apk/release/app-release.apk ../svitlo-widget.apk
-          echo "{\"versionCode\": $BUILD, \"versionName\": \"7.$BUILD\", \"commit\": \"$GITHUB_SHA\"}" > ../version.json
+          echo "{\"versionCode\": $BUILD, \"versionName\": \"8.$BUILD\", \"commit\": \"$GITHUB_SHA\"}" > ../version.json
           cat ../version.json
 
       - uses: actions/upload-artifact@v4
